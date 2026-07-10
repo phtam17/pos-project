@@ -1,0 +1,15 @@
+{
+  "name": "@pos/payments-simulated",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@pos/domain": "0.1.0",
+    "@pos/payment-contract": "0.1.0"
+  }
+}

@@ -1,0 +1,17 @@
+export type MerchantId = string;
+export type LocationId = string;
+export type RegisterId = string;
+export type TerminalId = string;
+export type StaffId = string;
+export type ProductId = string;
+export type CartId = string;
+export type CartLineId = string;
+export type OrderId = string;
+export type PaymentAttemptId = string;
+export type PaymentId = string;
+export type RefundId = string;
+export type ReceiptId = string;
+export type SettlementBatchId = string;
+export type SettlementLineId = string;
+export type AuditEntryId = string;
+export type OutboxMessageId = string;

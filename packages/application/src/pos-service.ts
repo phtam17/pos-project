@@ -1,0 +1,787 @@
+import { createHash, randomUUID } from "node:crypto";
+
+import {
+  AuditEntry,
+  Cart,
+  Money,
+  Order,
+  OutboxMessage,
+  Payment,
+  PaymentAttempt,
+  Product,
+  Refund,
+  type PaymentAttemptStatus
+} from "@pos/domain";
+import {
+  PaymentProviderError,
+  type PaymentProvider,
+  type PaymentResult,
+  type ProviderEvent,
+  type ProviderWebhookHeaders,
+  type RefundResult
+} from "@pos/payment-contract";
+import type {
+  IdempotencyRecord,
+  IdempotencyClaim,
+  PosRepository,
+  ReconciliationQuery,
+  ReconciliationSummary
+} from "@pos/persistence";
+
+import { ApplicationError, notFound } from "./errors.js";
+
+export interface CreateProductCommand {
+  readonly sku: string;
+  readonly name: string;
+  readonly priceMinor: string;
+  readonly currency: string;
+  readonly taxRateBps?: number;
+  readonly active?: boolean;
+}
+
+export interface StartPaymentCommand {
+  readonly orderId: string;
+  readonly tender: "cash" | "card";
+  readonly terminalId?: string;
+  readonly idempotencyKey: string;
+}
+
+export interface StartPaymentResult {
+  readonly attempt: PaymentAttempt;
+  readonly payment?: Payment;
+  readonly replayed: boolean;
+}
+
+export interface RefundCommand {
+  readonly paymentId: string;
+  readonly amountMinor: string;
+  readonly reason: string;
+  readonly idempotencyKey: string;
+}
+
+export interface RefundCommandResult {
+  readonly refund: Refund;
+  readonly replayed: boolean;
+}
+
+const TERMINAL_STATUSES = new Set<PaymentAttemptStatus>([
+  "CAPTURED",
+  "DECLINED",
+  "CANCELED"
+]);
+
+export class PosService {
+  constructor(
+    private readonly repository: PosRepository,
+    private readonly paymentProvider: PaymentProvider,
+    private readonly now: () => Date = () => new Date()
+  ) {}
+
+  listProducts(search?: string): Promise<readonly Product[]> {
+    return this.repository.listProducts({ activeOnly: true, ...(search ? { search } : {}) });
+  }
+
+  async createProduct(command: CreateProductCommand): Promise<Product> {
+    const product = new Product({
+      id: randomUUID(),
+      sku: command.sku,
+      name: command.name,
+      unitPrice: Money.fromMinor(parseMinor(command.priceMinor), command.currency),
+      taxRateBps: command.taxRateBps ?? 0,
+      active: command.active ?? true
+    });
+    await this.repository.createProduct(product);
+    await this.record("Product", product.id, "PRODUCT_CREATED", {
+      sku: product.sku,
+      priceMinor: product.unitPrice.minorUnits.toString()
+    });
+    return product;
+  }
+
+  async createCart(currency = "USD"): Promise<Cart> {
+    const cart = new Cart({ id: randomUUID(), currency });
+    await this.repository.createCart(cart);
+    await this.record("Cart", cart.id, "CART_CREATED", { currency: cart.currency });
+    return cart;
+  }
+
+  async getCart(id: string): Promise<Cart> {
+    return (await this.repository.getCart(id)) ?? Promise.reject(notFound("Cart", id));
+  }
+
+  async addCartLine(cartId: string, productId: string, quantity: number): Promise<Cart> {
+    const [cart, product] = await Promise.all([
+      this.getCart(cartId),
+      this.repository.getProduct(productId)
+    ]);
+    if (!product) throw notFound("Product", productId);
+    const expectedVersion = cart.version;
+    // Line IDs are stable within a cart but globally unique for persistence.
+    // Using product.id alone would collide when two carts contain the same SKU.
+    cart.addProduct(product, quantity, `${cart.id}:${product.id}`, this.now());
+    await this.repository.saveCart(cart, expectedVersion);
+    await this.record("Cart", cart.id, "CART_LINE_ADDED", { productId, quantity });
+    return cart;
+  }
+
+  async removeCartLine(cartId: string, lineId: string): Promise<Cart> {
+    const cart = await this.getCart(cartId);
+    const expectedVersion = cart.version;
+    cart.removeLine(lineId, this.now());
+    await this.repository.saveCart(cart, expectedVersion);
+    await this.record("Cart", cart.id, "CART_LINE_REMOVED", { lineId });
+    return cart;
+  }
+
+  async checkout(cartId: string, idempotencyKey: string): Promise<Order> {
+    const scope = `cart-checkout:${cartId}`;
+    const requestHash = hashRequest({ cartId });
+    const cart = await this.getCart(cartId);
+    const previouslyCreated = await this.repository.findOrderByCartId(cartId);
+    if (previouslyCreated) return previouslyCreated;
+    if (cart.status === "OPEN") {
+      const expectedVersion = cart.version;
+      cart.markCheckedOut(this.now());
+      await this.repository.saveCart(cart, expectedVersion);
+    } else if (cart.status !== "CHECKED_OUT") {
+      throw new ApplicationError(`Cart cannot be checked out while ${cart.status}`, "CART_NOT_OPEN", 409);
+    }
+    const proposedOrderId = randomUUID();
+    const claim = await this.claimIdempotency({
+      scope,
+      key: idempotencyKey,
+      requestHash,
+      state: "IN_PROGRESS",
+      resourceId: proposedOrderId
+    });
+    if (!claim.claimed) {
+      const resourceId = claim.record.resourceId;
+      if (!resourceId) {
+        throw new ApplicationError("Checkout is already in progress", "IDEMPOTENCY_IN_PROGRESS", 409);
+      }
+      const replayedOrder = await this.repository.getOrder(resourceId);
+      if (replayedOrder) return replayedOrder;
+      const repairedOrder = Order.fromCart(resourceId, cart, this.now());
+      await this.repository.createOrder(repairedOrder);
+      await this.completeIdempotency(scope, idempotencyKey, requestHash, repairedOrder.id);
+      return repairedOrder;
+    }
+    const order = Order.fromCart(proposedOrderId, cart, this.now());
+    try {
+      await this.repository.createOrder(order);
+    } catch (error) {
+      // A different API process/key may have converted this cart after our
+      // pre-check. The cart can have only one immutable order snapshot.
+      const concurrentOrder = await this.repository.findOrderByCartId(cartId);
+      if (!concurrentOrder) throw error;
+      await this.completeIdempotency(
+        scope,
+        idempotencyKey,
+        requestHash,
+        concurrentOrder.id
+      );
+      return concurrentOrder;
+    }
+    await this.completeIdempotency(scope, idempotencyKey, requestHash, order.id);
+    await this.record("Order", order.id, "ORDER_CREATED", {
+      cartId,
+      totalMinor: order.total.minorUnits.toString(),
+      currency: order.currency
+    });
+    return order;
+  }
+
+  async getOrder(id: string): Promise<Order> {
+    return (await this.repository.getOrder(id)) ?? Promise.reject(notFound("Order", id));
+  }
+
+  async startPayment(command: StartPaymentCommand): Promise<StartPaymentResult> {
+    if (command.idempotencyKey.trim().length < 8) {
+      throw new ApplicationError(
+        "An Idempotency-Key of at least 8 characters is required",
+        "IDEMPOTENCY_KEY_REQUIRED",
+        400
+      );
+    }
+    const scope = `order-payment:${command.orderId}`;
+    const requestHash = hashRequest({
+      orderId: command.orderId,
+      tender: command.tender,
+      terminalId: command.terminalId ?? null
+    });
+    const replay = await this.loadPaymentReplay(scope, command.idempotencyKey, requestHash);
+    if (replay) return replay;
+
+    const order = await this.getOrder(command.orderId);
+    if (order.status === "PAID" || order.status === "REFUNDED") {
+      throw new ApplicationError("The order is already paid", "ORDER_ALREADY_PAID", 409);
+    }
+    if (order.status !== "OPEN") {
+      throw new ApplicationError(
+        `Order cannot be paid while ${order.status}`,
+        "ORDER_NOT_PAYABLE",
+        409
+      );
+    }
+
+    const providerName = command.tender === "cash" ? "cash" : this.paymentProvider.name;
+    const terminalId = command.tender === "cash"
+      ? "cash-drawer"
+      : command.terminalId?.trim();
+    if (!terminalId) {
+      throw new ApplicationError("terminalId is required for card payments", "TERMINAL_REQUIRED");
+    }
+
+    const attempt = PaymentAttempt.create({
+      id: randomUUID(),
+      orderId: order.id,
+      provider: providerName,
+      amount: order.total,
+      terminalId,
+      idempotencyKey: command.idempotencyKey,
+      createdAt: this.now()
+    });
+    const claim = await this.claimIdempotency({
+      scope,
+      key: command.idempotencyKey,
+      requestHash,
+      state: "IN_PROGRESS",
+      resourceId: attempt.id
+    });
+    if (!claim.claimed) {
+      if (!claim.record.resourceId) {
+        throw new ApplicationError("Payment is already in progress", "IDEMPOTENCY_IN_PROGRESS", 409);
+      }
+      const replay = await this.repository.getPaymentAttempt(claim.record.resourceId);
+      if (!replay) {
+        throw new ApplicationError("Payment is still being committed", "IDEMPOTENCY_IN_PROGRESS", 409);
+      }
+      if (replay.status === "CREATED") {
+        return { attempt: replay, replayed: true };
+      }
+      return this.getPaymentAttempt(replay.id, true);
+    }
+    await this.repository.createPaymentAttempt(attempt);
+
+    order.markPaymentPending(this.now());
+    await this.repository.saveOrder(order, order.version - 1);
+
+    if (command.tender === "cash") {
+      attempt.transitionTo("CAPTURED", {
+        providerReference: `cash_${attempt.id}`,
+        at: this.now()
+      });
+      await this.repository.savePaymentAttempt(attempt);
+      const payment = await this.capturePayment(order, attempt, {
+        attemptId: attempt.id,
+        status: "CAPTURED",
+        providerPaymentId: `cash_${attempt.id}`,
+        providerReference: `cash_${attempt.id}`,
+        failureCode: null,
+        failureMessage: null,
+        card: null,
+        processedAt: this.now()
+      });
+      await this.completeIdempotency(scope, command.idempotencyKey, requestHash, attempt.id);
+      return { attempt, payment, replayed: false };
+    }
+
+    let result: PaymentResult;
+    try {
+      result = await this.paymentProvider.startSale({
+        attemptId: attempt.id,
+        orderId: order.id,
+        amount: order.total,
+        terminalId,
+        idempotencyKey: command.idempotencyKey,
+        metadata: { orderId: order.id }
+      });
+    } catch (error) {
+      const deterministic = error instanceof PaymentProviderError
+        && !error.retryable
+        && error.code !== "PROVIDER_UNAVAILABLE";
+      attempt.transitionTo(deterministic ? "CANCELED" : "UNKNOWN", {
+        failureCode: error instanceof PaymentProviderError ? error.code : "PROVIDER_UNAVAILABLE",
+        at: this.now()
+      });
+      await this.repository.savePaymentAttempt(attempt, attempt.version - 1);
+      if (deterministic) {
+        order.reopenAfterFailedPayment(this.now());
+        await this.repository.saveOrder(order, order.version - 1);
+      }
+      await this.completeIdempotency(scope, command.idempotencyKey, requestHash, attempt.id);
+      await this.record("PaymentAttempt", attempt.id, "PAYMENT_ATTEMPT_UPDATED", {
+        orderId: attempt.orderId,
+        status: attempt.status,
+        provider: attempt.provider,
+        failureCode: attempt.failureCode
+      });
+      throw error;
+    }
+    const payment = await this.applyProviderResult(order, attempt, result);
+    await this.completeIdempotency(scope, command.idempotencyKey, requestHash, attempt.id);
+    return { attempt, ...(payment ? { payment } : {}), replayed: false };
+  }
+
+  async getPaymentAttempt(id: string, refresh = true): Promise<StartPaymentResult> {
+    const attempt = await this.repository.getPaymentAttempt(id);
+    if (!attempt) throw notFound("Payment attempt", id);
+    const existingPayments = await this.repository.listPaymentsForOrder(attempt.orderId);
+    const existing = existingPayments.find((payment) => payment.paymentAttemptId === attempt.id);
+    const order = await this.getOrder(attempt.orderId);
+    if (existing) {
+      if (order.status === "OPEN" || order.status === "PAYMENT_PENDING") {
+        const expectedVersion = order.version;
+        if (order.status === "OPEN") order.markPaymentPending(this.now());
+        order.markPaid(existing.amount, this.now());
+        await this.repository.saveOrder(order, expectedVersion);
+      }
+      return { attempt, payment: existing, replayed: false };
+    }
+    if (!refresh) return { attempt, replayed: false };
+
+    if (attempt.status === "CAPTURED") {
+      const result: PaymentResult = attempt.provider === "cash"
+        ? {
+            attemptId: attempt.id,
+            status: "CAPTURED",
+            providerPaymentId: attempt.providerReference,
+            providerReference: attempt.providerReference,
+            failureCode: null,
+            failureMessage: null,
+            card: null,
+            processedAt: attempt.updatedAt
+          }
+        : await this.paymentProvider.getStatus(attempt.id);
+      const payment = await this.applyProviderResult(order, attempt, result);
+      return { attempt, ...(payment ? { payment } : {}), replayed: false };
+    }
+    if (attempt.status === "DECLINED" || attempt.status === "CANCELED") {
+      return { attempt, replayed: false };
+    }
+    if (attempt.provider === "cash") return { attempt, replayed: false };
+
+    const result = await this.paymentProvider.getStatus(attempt.id);
+    const payment = await this.applyProviderResult(order, attempt, result);
+    return { attempt, ...(payment ? { payment } : {}), replayed: false };
+  }
+
+  async cancelPaymentAttempt(id: string): Promise<PaymentAttempt> {
+    const attempt = await this.repository.getPaymentAttempt(id);
+    if (!attempt) throw notFound("Payment attempt", id);
+    if (attempt.provider === "cash") {
+      throw new ApplicationError("Captured cash payments cannot be canceled", "CANCEL_NOT_ALLOWED", 409);
+    }
+    if (!this.paymentProvider.capabilities.supportsCancellation) {
+      throw new ApplicationError(
+        "The configured payment provider does not support cancellation",
+        "CANCEL_NOT_SUPPORTED",
+        501
+      );
+    }
+    if (TERMINAL_STATUSES.has(attempt.status)) {
+      throw new ApplicationError(
+        `Payment attempt cannot be canceled while ${attempt.status}`,
+        "CANCEL_NOT_ALLOWED",
+        409
+      );
+    }
+    const order = await this.getOrder(attempt.orderId);
+    const result = await this.paymentProvider.cancel(attempt.id);
+    await this.applyProviderResult(order, attempt, result);
+    return attempt;
+  }
+
+  async getPayment(id: string): Promise<Payment> {
+    return (await this.repository.getPayment(id)) ?? Promise.reject(notFound("Payment", id));
+  }
+
+  async listPaymentsForOrder(orderId: string): Promise<readonly Payment[]> {
+    return this.repository.listPaymentsForOrder(orderId);
+  }
+
+  async refundPayment(command: RefundCommand): Promise<RefundCommandResult> {
+    const scope = `payment-refund:${command.paymentId}`;
+    const requestHash = hashRequest({
+      paymentId: command.paymentId,
+      amountMinor: command.amountMinor,
+      reason: command.reason
+    });
+    const existing = await this.repository.getIdempotency(scope, command.idempotencyKey);
+    if (existing) {
+      assertMatchingHash(existing, requestHash);
+      if (!existing.resourceId) {
+        throw new ApplicationError("Refund is already in progress", "IDEMPOTENCY_IN_PROGRESS", 409);
+      }
+      const refunds = await this.repository.listRefundsForPayment(command.paymentId);
+      const refund = refunds.find((candidate) => candidate.id === existing.resourceId);
+      if (!refund) throw notFound("Refund", existing.resourceId);
+      const payment = await this.getPayment(command.paymentId);
+      if (refund.status === "PENDING") {
+        if (payment.provider === "cash") {
+          refund.markSucceeded(`cash_refund_${refund.id}`, this.now());
+        } else {
+          const result = await this.paymentProvider.refund({
+            refundId: refund.id,
+            paymentId: payment.providerReference,
+            amount: refund.amount,
+            idempotencyKey: refund.idempotencyKey,
+            metadata: { reason: command.reason }
+          });
+          this.applyRefundResult(refund, payment, result);
+        }
+        if (refund.version > 0) await this.repository.saveRefund(refund, 0);
+        await this.completeIdempotency(scope, command.idempotencyKey, requestHash, refund.id);
+      }
+      if (refund.status === "SUCCEEDED") await this.repairOrderAfterRefund(payment);
+      return { refund, replayed: true };
+    }
+
+    const payment = await this.getPayment(command.paymentId);
+    const amount = Money.fromMinor(parseMinor(command.amountMinor), payment.amount.currency);
+    if (amount.minorUnits <= 0n) {
+      throw new ApplicationError("Refund amount must be positive", "INVALID_REFUND_AMOUNT");
+    }
+    if (
+      amount.compare(payment.amount) < 0 &&
+      !this.paymentProvider.capabilities.supportsPartialRefunds
+    ) {
+      throw new ApplicationError(
+        "The configured payment provider does not support partial refunds",
+        "PARTIAL_REFUND_NOT_SUPPORTED",
+        409
+      );
+    }
+    const prior = await this.repository.listRefundsForPayment(payment.id);
+    const alreadyRefunded = prior
+      .filter((refund) => refund.status === "SUCCEEDED" || refund.status === "PENDING")
+      .reduce((sum, refund) => sum.add(refund.amount), Money.zero(payment.amount.currency));
+    if (alreadyRefunded.add(amount).compare(payment.amount) > 0) {
+      throw new ApplicationError(
+        "Refund amount exceeds the remaining captured amount",
+        "REFUND_EXCEEDS_CAPTURE",
+        409
+      );
+    }
+
+    const refund = Refund.create({
+      id: randomUUID(),
+      paymentId: payment.id,
+      provider: payment.provider,
+      amount,
+      idempotencyKey: command.idempotencyKey,
+      createdAt: this.now()
+    });
+    const claim = await this.claimIdempotency({
+      scope,
+      key: command.idempotencyKey,
+      requestHash,
+      state: "IN_PROGRESS",
+      resourceId: refund.id
+    });
+    if (!claim.claimed) {
+      if (!claim.record.resourceId) {
+        throw new ApplicationError("Refund is already in progress", "IDEMPOTENCY_IN_PROGRESS", 409);
+      }
+      const refunds = await this.repository.listRefundsForPayment(payment.id);
+      const replay = refunds.find((candidate) => candidate.id === claim.record.resourceId);
+      if (!replay) {
+        throw new ApplicationError("Refund is still being committed", "IDEMPOTENCY_IN_PROGRESS", 409);
+      }
+      return { refund: replay, replayed: true };
+    }
+    await this.repository.reserveRefund(refund);
+
+    if (payment.provider === "cash") {
+      refund.markSucceeded(`cash_refund_${refund.id}`, this.now());
+    } else {
+      const result = await this.paymentProvider.refund({
+        refundId: refund.id,
+        paymentId: payment.providerReference,
+        amount,
+        idempotencyKey: command.idempotencyKey,
+        metadata: { reason: command.reason }
+      });
+      this.applyRefundResult(refund, payment, result);
+    }
+    if (refund.version > 0) await this.repository.saveRefund(refund, 0);
+    await this.completeIdempotency(scope, command.idempotencyKey, requestHash, refund.id);
+    await this.record("Refund", refund.id, "REFUND_UPDATED", {
+      paymentId: payment.id,
+      status: refund.status,
+      amountMinor: refund.amount.minorUnits.toString(),
+      reason: command.reason
+    });
+
+    if (refund.status === "SUCCEEDED") await this.repairOrderAfterRefund(payment);
+    return { refund, replayed: false };
+  }
+
+  async verifyWebhook(
+    rawBody: Uint8Array,
+    headers: ProviderWebhookHeaders
+  ): Promise<ProviderEvent> {
+    const event = await this.paymentProvider.verifyWebhook(rawBody, headers);
+    await this.record("ProviderEvent", event.id, "PROVIDER_EVENT_VERIFIED", {
+      type: event.type,
+      occurredAt: event.occurredAt.toISOString()
+    });
+    const attemptId = event.data.attemptId;
+    if (typeof attemptId === "string") await this.getPaymentAttempt(attemptId, true);
+    return event;
+  }
+
+  reconciliationSummary(query: ReconciliationQuery): Promise<ReconciliationSummary> {
+    return this.repository.reconciliationSummary(query);
+  }
+
+  async close(): Promise<void> {
+    await this.repository.close();
+  }
+
+  private async loadPaymentReplay(
+    scope: string,
+    key: string,
+    requestHash: string
+  ): Promise<StartPaymentResult | undefined> {
+    const existing = await this.repository.getIdempotency(scope, key);
+    if (!existing) return undefined;
+    assertMatchingHash(existing, requestHash);
+    if (!existing.resourceId) {
+      throw new ApplicationError("Payment is already in progress", "IDEMPOTENCY_IN_PROGRESS", 409);
+    }
+    // A replay can be the recovery path after the first response was UNKNOWN
+    // or the client lost the response. Query the original provider attempt;
+    // never create a second charge.
+    const stored = await this.getPaymentAttempt(existing.resourceId, false);
+    const result = stored.attempt.status === "CREATED"
+      ? await this.resumeCreatedAttempt(stored.attempt, scope, key, requestHash)
+      : await this.getPaymentAttempt(existing.resourceId, true);
+    return { ...result, replayed: true };
+  }
+
+  private async resumeCreatedAttempt(
+    attempt: PaymentAttempt,
+    scope: string,
+    key: string,
+    requestHash: string
+  ): Promise<StartPaymentResult> {
+    const order = await this.getOrder(attempt.orderId);
+    if (order.status === "OPEN") {
+      const expectedVersion = order.version;
+      order.markPaymentPending(this.now());
+      await this.repository.saveOrder(order, expectedVersion);
+    }
+    const result = await this.paymentProvider.startSale({
+      attemptId: attempt.id,
+      orderId: attempt.orderId,
+      amount: attempt.amount,
+      terminalId: attempt.terminalId,
+      idempotencyKey: attempt.idempotencyKey,
+      metadata: { orderId: attempt.orderId }
+    });
+    const payment = await this.applyProviderResult(order, attempt, result);
+    await this.completeIdempotency(scope, key, requestHash, attempt.id);
+    return { attempt, ...(payment ? { payment } : {}), replayed: true };
+  }
+
+  private async applyProviderResult(
+    order: Order,
+    attempt: PaymentAttempt,
+    result: PaymentResult
+  ): Promise<Payment | undefined> {
+    if (result.attemptId !== attempt.id) {
+      throw new ApplicationError("Provider returned the wrong attempt", "PROVIDER_RESULT_MISMATCH", 502);
+    }
+    if (attempt.status !== result.status) {
+      attempt.transitionTo(result.status, {
+        ...(result.providerReference ? { providerReference: result.providerReference } : {}),
+        failureCode: result.failureCode,
+        at: result.processedAt
+      });
+      await this.repository.savePaymentAttempt(attempt);
+    }
+    if (result.status === "CAPTURED") {
+      const existing = (await this.repository.listPaymentsForOrder(order.id)).find(
+        (payment) => payment.paymentAttemptId === attempt.id
+      );
+      return existing ?? this.capturePayment(order, attempt, result);
+    }
+    if ((result.status === "DECLINED" || result.status === "CANCELED") && order.status === "PAYMENT_PENDING") {
+      order.reopenAfterFailedPayment(result.processedAt);
+      await this.repository.saveOrder(order, order.version - 1);
+    }
+    await this.record("PaymentAttempt", attempt.id, "PAYMENT_ATTEMPT_UPDATED", {
+      orderId: attempt.orderId,
+      status: attempt.status,
+      provider: attempt.provider
+    });
+    return undefined;
+  }
+
+  private async capturePayment(
+    order: Order,
+    attempt: PaymentAttempt,
+    result: PaymentResult
+  ): Promise<Payment> {
+    const providerReference = result.providerPaymentId ?? result.providerReference;
+    if (!providerReference) {
+      throw new ApplicationError(
+        "Captured provider result has no payment reference",
+        "MISSING_PROVIDER_REFERENCE",
+        502
+      );
+    }
+    const payment = new Payment({
+      id: randomUUID(),
+      orderId: order.id,
+      paymentAttemptId: attempt.id,
+      provider: attempt.provider,
+      providerReference,
+      amount: attempt.amount,
+      card: result.card,
+      capturedAt: result.processedAt
+    });
+    await this.repository.createPayment(payment);
+    if (order.status !== "PAID") {
+      order.markPaid(payment.amount, result.processedAt);
+      await this.repository.saveOrder(order, order.version - 1);
+    }
+    await this.record("Payment", payment.id, "PAYMENT_CAPTURED", {
+      orderId: order.id,
+      provider: payment.provider,
+      amountMinor: payment.amount.minorUnits.toString(),
+      currency: payment.amount.currency
+    });
+    return payment;
+  }
+
+  private applyRefundResult(
+    refund: Refund,
+    payment: Payment,
+    result: RefundResult
+  ): void {
+    if (
+      result.refundId !== refund.id ||
+      result.paymentId !== payment.providerReference ||
+      !result.amount.equals(refund.amount)
+    ) {
+      throw new ApplicationError(
+        "Provider returned refund data that does not match the request",
+        "PROVIDER_REFUND_MISMATCH",
+        502
+      );
+    }
+    if (result.status === "SUCCEEDED") {
+      if (!result.providerRefundId) {
+        throw new ApplicationError(
+          "Successful provider refund has no reference",
+          "MISSING_PROVIDER_REFERENCE",
+          502
+        );
+      }
+      refund.markSucceeded(result.providerRefundId, result.processedAt);
+    } else if (result.status === "FAILED") {
+      refund.markFailed(result.failureCode ?? "REFUND_FAILED", result.processedAt);
+    }
+  }
+
+  private async repairOrderAfterRefund(payment: Payment): Promise<void> {
+    const allRefunds = await this.repository.listRefundsForPayment(payment.id);
+    const total = allRefunds
+      .filter((candidate) => candidate.status === "SUCCEEDED")
+      .reduce((sum, candidate) => sum.add(candidate.amount), Money.zero(payment.amount.currency));
+    if (!total.equals(payment.amount)) return;
+    const order = await this.getOrder(payment.orderId);
+    if (order.status === "PAID") {
+      const expectedVersion = order.version;
+      order.markRefunded(total, this.now());
+      await this.repository.saveOrder(order, expectedVersion);
+    }
+  }
+
+  private async record(
+    aggregateType: string,
+    aggregateId: string,
+    action: string,
+    metadata: Readonly<Record<string, unknown>>
+  ): Promise<void> {
+    const occurredAt = this.now();
+    await Promise.all([
+      this.repository.appendAudit(new AuditEntry({
+        id: randomUUID(),
+        aggregateType,
+        aggregateId,
+        action,
+        actorId: null,
+        metadata,
+        occurredAt
+      })),
+      this.repository.enqueueOutbox(OutboxMessage.create({
+        id: randomUUID(),
+        topic: action.toLocaleLowerCase().replaceAll("_", "."),
+        aggregateId,
+        payload: { aggregateType, aggregateId, action, ...metadata },
+        occurredAt
+      }))
+    ]);
+  }
+
+  private claimIdempotency(
+    input: Pick<IdempotencyRecord, "scope" | "key" | "requestHash" | "state" | "resourceId">
+  ): Promise<IdempotencyClaim> {
+    const timestamp = this.now();
+    return this.repository.claimIdempotency({
+      ...input,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      expiresAt: new Date(timestamp.getTime() + 24 * 60 * 60 * 1000)
+    });
+  }
+
+  private completeIdempotency(
+    scope: string,
+    key: string,
+    requestHash: string,
+    resourceId: string
+  ): Promise<IdempotencyRecord> {
+    const timestamp = this.now();
+    return this.repository.saveIdempotency({
+      scope,
+      key,
+      requestHash,
+      state: "COMPLETED",
+      resourceId,
+      responseStatus: 200,
+      responseBody: { resourceId },
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      expiresAt: new Date(timestamp.getTime() + 24 * 60 * 60 * 1000)
+    });
+  }
+}
+
+function parseMinor(value: string): bigint {
+  if (!/^\d+$/.test(value)) {
+    throw new ApplicationError("Money must be an integer minor-unit string", "INVALID_MONEY");
+  }
+  return BigInt(value);
+}
+
+function hashRequest(value: Readonly<Record<string, unknown>>): string {
+  const canonical = Object.keys(value)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${JSON.stringify(value[key])}`)
+    .join(",");
+  return createHash("sha256").update(`{${canonical}}`).digest("hex");
+}
+
+function assertMatchingHash(record: IdempotencyRecord, requestHash: string): void {
+  if (record.requestHash !== requestHash) {
+    throw new ApplicationError(
+      "The Idempotency-Key was already used for a different request",
+      "IDEMPOTENCY_CONFLICT",
+      409
+    );
+  }
+}

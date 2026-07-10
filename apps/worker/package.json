@@ -1,0 +1,13 @@
+{
+  "name": "@pos/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@pos/application": "0.1.0",
+    "@pos/domain": "0.1.0",
+    "@pos/payment-contract": "0.1.0",
+    "@pos/payments-simulated": "0.1.0",
+    "@pos/persistence": "0.1.0"
+  }
+}

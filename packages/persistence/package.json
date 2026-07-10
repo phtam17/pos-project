@@ -1,0 +1,21 @@
+{
+  "name": "@pos/persistence",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "migrate": "node --env-file-if-exists=../../.env --import tsx src/migrate.ts",
+    "seed": "node --env-file-if-exists=../../.env --import tsx src/seed.ts",
+    "test": "vitest run --root ../.. packages/persistence/src/memory-repository.test.ts"
+  },
+  "dependencies": {
+    "@pos/domain": "0.1.0",
+    "pg": "^8.16.0"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.15.0"
+  }
+}

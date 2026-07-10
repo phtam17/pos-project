@@ -1,0 +1,335 @@
+export type AmountMinor = string;
+export type Tender = "cash" | "card";
+
+export interface ProductDto {
+  id: string;
+  name: string;
+  sku: string;
+  barcode?: string;
+  category: string;
+  priceMinor: AmountMinor;
+  currency: string;
+  available: boolean;
+}
+
+export interface CartLineDto {
+  id: string;
+  productId: string;
+  name: string;
+  sku?: string;
+  quantity: number;
+  unitPriceMinor: AmountMinor;
+  lineTotalMinor: AmountMinor;
+}
+
+export interface CartDto {
+  id: string;
+  status: string;
+  currency: string;
+  lines: CartLineDto[];
+  subtotalMinor: AmountMinor;
+  taxMinor: AmountMinor;
+  totalMinor: AmountMinor;
+}
+
+export interface OrderDto {
+  id: string;
+  number: string;
+  status: string;
+  currency: string;
+  lines: CartLineDto[];
+  subtotalMinor: AmountMinor;
+  taxMinor: AmountMinor;
+  totalMinor: AmountMinor;
+  createdAt?: string;
+}
+
+export interface PaymentAttemptDto {
+  id: string;
+  orderId: string;
+  status: string;
+  tender: Tender;
+  amountMinor: AmountMinor;
+  cardBrand?: string;
+  last4?: string;
+  failureMessage?: string;
+  createdAt?: string;
+}
+
+export interface ReceiptDto {
+  orderId: string;
+  orderNumber: string;
+  currency: string;
+  createdAt: string;
+  lines: CartLineDto[];
+  subtotalMinor: AmountMinor;
+  taxMinor: AmountMinor;
+  totalMinor: AmountMinor;
+  tender?: Tender;
+  paymentStatus?: string;
+  cardBrand?: string;
+  last4?: string;
+}
+
+const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") ?? "";
+
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code: string | undefined;
+
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+type JsonRecord = Record<string, unknown>;
+
+function isRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function record(value: unknown): JsonRecord {
+  return isRecord(value) ? value : {};
+}
+
+function envelope(value: unknown, keys: string[]): unknown {
+  let current = value;
+
+  if (isRecord(current) && "data" in current) {
+    current = current.data;
+  }
+
+  if (isRecord(current)) {
+    for (const key of keys) {
+      if (key in current) return current[key];
+    }
+  }
+
+  return current;
+}
+
+function text(value: unknown, fallback = ""): string {
+  return typeof value === "string" || typeof value === "number" ? String(value) : fallback;
+}
+
+function amount(value: unknown, fallback = "0"): AmountMinor {
+  const candidate = text(value, fallback);
+  return /^-?\d+$/.test(candidate) ? candidate : fallback;
+}
+
+function numeric(value: unknown, fallback = 0): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function optionalText(value: unknown): string | undefined {
+  const candidate = text(value);
+  return candidate.length > 0 ? candidate : undefined;
+}
+
+function normalizeProduct(value: unknown): ProductDto {
+  const source = record(value);
+  const optionalBarcode = optionalText(source.barcode);
+
+  return {
+    id: text(source.id),
+    name: text(source.name, "Unnamed product"),
+    sku: text(source.sku, "—"),
+    ...(optionalBarcode ? { barcode: optionalBarcode } : {}),
+    category: text(source.category, "Other"),
+    priceMinor: amount(source.priceMinor ?? source.unitPriceMinor),
+    currency: text(source.currency, "USD").toUpperCase(),
+    available: source.available !== false && source.active !== false
+  };
+}
+
+function normalizeLine(value: unknown): CartLineDto {
+  const source = record(value);
+  const product = record(source.product);
+  const quantity = numeric(source.quantity, 1);
+  const unitPriceMinor = amount(source.unitPriceMinor ?? source.priceMinor ?? product.priceMinor);
+  const computedTotal = String(Math.round(Number(unitPriceMinor) * quantity));
+  const optionalSku = optionalText(source.sku ?? product.sku);
+
+  return {
+    id: text(source.id ?? source.lineId),
+    productId: text(source.productId ?? product.id),
+    name: text(source.name ?? source.productName ?? product.name, "Item"),
+    ...(optionalSku ? { sku: optionalSku } : {}),
+    quantity,
+    unitPriceMinor,
+    lineTotalMinor: amount(source.lineTotalMinor ?? source.totalMinor, computedTotal)
+  };
+}
+
+function normalizeCart(value: unknown): CartDto {
+  const source = record(envelope(value, ["cart"]));
+  const lines = Array.isArray(source.lines) ? source.lines.map(normalizeLine) : [];
+  const computedSubtotal = lines.reduce((sum, line) => sum + Number(line.lineTotalMinor), 0);
+  const subtotalMinor = amount(source.subtotalMinor, String(computedSubtotal));
+  const taxMinor = amount(source.taxMinor);
+  const computedTotal = String(Number(subtotalMinor) + Number(taxMinor));
+
+  return {
+    id: text(source.id),
+    status: text(source.status, "OPEN").toUpperCase(),
+    currency: text(source.currency, "USD").toUpperCase(),
+    lines,
+    subtotalMinor,
+    taxMinor,
+    totalMinor: amount(source.totalMinor, computedTotal)
+  };
+}
+
+function normalizeOrder(value: unknown): OrderDto {
+  const source = record(envelope(value, ["order"]));
+  const cartShape = normalizeCart(source);
+  const optionalCreatedAt = optionalText(source.createdAt);
+
+  return {
+    id: text(source.id),
+    number: text(source.number ?? source.orderNumber, text(source.id).slice(0, 8).toUpperCase()),
+    status: text(source.status, "AWAITING_PAYMENT").toUpperCase(),
+    currency: cartShape.currency,
+    lines: cartShape.lines,
+    subtotalMinor: cartShape.subtotalMinor,
+    taxMinor: cartShape.taxMinor,
+    totalMinor: cartShape.totalMinor,
+    ...(optionalCreatedAt ? { createdAt: optionalCreatedAt } : {})
+  };
+}
+
+function normalizePayment(value: unknown): PaymentAttemptDto {
+  const source = record(envelope(value, ["paymentAttempt", "attempt", "payment"]));
+  const optionalBrand = optionalText(source.cardBrand ?? source.brand);
+  const optionalLast4 = optionalText(source.last4);
+  const optionalFailure = optionalText(source.failureMessage ?? source.message);
+  const optionalCreatedAt = optionalText(source.createdAt);
+  const tenderValue = text(source.tender, "card").toLowerCase();
+
+  return {
+    id: text(source.id),
+    orderId: text(source.orderId),
+    status: text(source.status, "UNKNOWN").toUpperCase(),
+    tender: tenderValue === "cash" ? "cash" : "card",
+    amountMinor: amount(source.amountMinor),
+    ...(optionalBrand ? { cardBrand: optionalBrand } : {}),
+    ...(optionalLast4 ? { last4: optionalLast4 } : {}),
+    ...(optionalFailure ? { failureMessage: optionalFailure } : {}),
+    ...(optionalCreatedAt ? { createdAt: optionalCreatedAt } : {})
+  };
+}
+
+function normalizeReceipt(value: unknown): ReceiptDto {
+  const source = record(envelope(value, ["receipt"]));
+  const payment = record(source.payment);
+  const order = normalizeOrder(source);
+  const optionalTender = optionalText(source.tender ?? payment.tender)?.toLowerCase();
+  const optionalPaymentStatus = optionalText(source.paymentStatus ?? payment.status);
+  const optionalBrand = optionalText(source.cardBrand ?? payment.cardBrand);
+  const optionalLast4 = optionalText(source.last4 ?? payment.last4);
+
+  return {
+    orderId: text(source.orderId ?? source.id),
+    orderNumber: text(source.orderNumber ?? source.number, order.number),
+    currency: order.currency,
+    createdAt: text(source.createdAt, new Date().toISOString()),
+    lines: order.lines,
+    subtotalMinor: order.subtotalMinor,
+    taxMinor: order.taxMinor,
+    totalMinor: order.totalMinor,
+    ...(optionalTender === "cash" || optionalTender === "card" ? { tender: optionalTender } : {}),
+    ...(optionalPaymentStatus ? { paymentStatus: optionalPaymentStatus } : {}),
+    ...(optionalBrand ? { cardBrand: optionalBrand } : {}),
+    ...(optionalLast4 ? { last4: optionalLast4 } : {})
+  };
+}
+
+async function request(path: string, init: RequestInit = {}): Promise<unknown> {
+  const headers = new Headers(init.headers);
+  headers.set("Accept", "application/json");
+  if (init.body !== undefined) headers.set("Content-Type", "application/json");
+
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE}${path}`, { ...init, headers });
+  } catch {
+    throw new ApiError("The register could not reach the POS service. Check the connection and try again.", 0, "NETWORK_ERROR");
+  }
+
+  const contentType = response.headers.get("content-type") ?? "";
+  const body: unknown = response.status === 204
+    ? undefined
+    : contentType.includes("application/json")
+      ? await response.json().catch(() => undefined)
+      : await response.text().catch(() => undefined);
+
+  if (!response.ok) {
+    const error = record(body);
+    const nestedError = record(error.error);
+    const message = text(error.message ?? nestedError.message, `The request failed (${response.status}).`);
+    const code = optionalText(error.code ?? nestedError.code);
+    throw new ApiError(message, response.status, code);
+  }
+
+  return body;
+}
+
+export const api = {
+  async listProducts(): Promise<ProductDto[]> {
+    const body = await request("/v1/products");
+    const products = envelope(body, ["products"]);
+    return Array.isArray(products) ? products.map(normalizeProduct).filter((product) => product.id.length > 0) : [];
+  },
+
+  async createCart(): Promise<CartDto> {
+    return normalizeCart(await request("/v1/carts", { method: "POST" }));
+  },
+
+  async getCart(cartId: string): Promise<CartDto> {
+    return normalizeCart(await request(`/v1/carts/${encodeURIComponent(cartId)}`));
+  },
+
+  async addCartLine(cartId: string, productId: string, quantity = 1): Promise<CartDto> {
+    return normalizeCart(await request(`/v1/carts/${encodeURIComponent(cartId)}/lines`, {
+      method: "POST",
+      body: JSON.stringify({ productId, quantity })
+    }));
+  },
+
+  async removeCartLine(cartId: string, lineId: string): Promise<CartDto> {
+    const body = await request(`/v1/carts/${encodeURIComponent(cartId)}/lines/${encodeURIComponent(lineId)}`, {
+      method: "DELETE"
+    });
+    return body === undefined ? this.getCart(cartId) : normalizeCart(body);
+  },
+
+  async checkoutCart(cartId: string, idempotencyKey: string): Promise<OrderDto> {
+    return normalizeOrder(await request(`/v1/carts/${encodeURIComponent(cartId)}/checkout`, {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey }
+    }));
+  },
+
+  async createPaymentAttempt(
+    orderId: string,
+    tender: Tender,
+    idempotencyKey: string,
+    terminalId?: string
+  ): Promise<PaymentAttemptDto> {
+    const body = tender === "card" && terminalId ? { tender, terminalId } : { tender };
+    return normalizePayment(await request(`/v1/orders/${encodeURIComponent(orderId)}/payment-attempts`, {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify(body)
+    }));
+  },
+
+  async getReceipt(orderId: string): Promise<ReceiptDto> {
+    return normalizeReceipt(await request(`/v1/orders/${encodeURIComponent(orderId)}/receipt`));
+  }
+};
