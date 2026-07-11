@@ -105,6 +105,26 @@ describe("payment lifecycle", () => {
       InvalidStateTransitionError,
     );
   });
+
+  it("allows a later capture to supersede a contradictory terminal result", () => {
+    const attempt = PaymentAttempt.create({
+      id: "attempt-late-capture",
+      orderId: "order-late-capture",
+      provider: "simulated",
+      amount: new Money(1_000n, "USD"),
+      terminalId: "terminal-1",
+      idempotencyKey: "sale:order-late-capture:1",
+      createdAt: T0,
+    });
+    attempt.transitionTo("DECLINED", { failureCode: "DECLINED", at: T1 });
+    attempt.transitionTo("CAPTURED", {
+      providerReference: "provider-late-capture",
+      at: T2,
+    });
+
+    expect(attempt.status).toBe("CAPTURED");
+    expect(attempt.failureCode).toBeNull();
+  });
 });
 
 describe("operational records", () => {

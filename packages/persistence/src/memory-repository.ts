@@ -140,6 +140,8 @@ export class MemoryPosRepository implements PosRepository {
   private readonly outboxLocks = new Map<string, Date>();
   private readonly settlementBatches = new Map<string, SettlementBatch>();
 
+  async healthCheck(): Promise<void> {}
+
   constructor(initialProducts: readonly Product[] = []) {
     for (const product of initialProducts) {
       const id = idOf(product);
@@ -151,7 +153,7 @@ export class MemoryPosRepository implements PosRepository {
   async listProducts(query: ProductQuery = {}): Promise<readonly Product[]> {
     const search = query.search?.trim().toLocaleLowerCase();
     const offset = Math.max(0, query.offset ?? 0);
-    const limit = Math.max(0, query.limit ?? Number.MAX_SAFE_INTEGER);
+    const limit = Math.max(0, query.limit ?? 500);
     return [...this.products.values()]
       .filter((product) => !query.activeOnly || readSnapshot(product).active === true)
       .filter((product) => {
@@ -244,10 +246,13 @@ export class MemoryPosRepository implements PosRepository {
 
   async createPaymentAttempt(attempt: PaymentAttempt): Promise<PaymentAttempt> {
     const key = textField(attempt, "idempotencyKey");
+    const orderId = textField(attempt, "orderId");
     if (
       key !== undefined &&
       [...this.paymentAttempts.values()].some(
-        (candidate) => textField(candidate, "idempotencyKey") === key
+        (candidate) =>
+          textField(candidate, "orderId") === orderId &&
+          textField(candidate, "idempotencyKey") === key
       )
     ) {
       throw new RepositoryConflictError("PaymentAttempt idempotency key", key);
@@ -258,6 +263,46 @@ export class MemoryPosRepository implements PosRepository {
       attempt
     );
     return this.create(this.paymentAttempts, "PaymentAttempt", attempt);
+  }
+
+  async reservePaymentAttempt(
+    order: Order,
+    attempt: PaymentAttempt,
+    expectedOrderVersion: number
+  ): Promise<PaymentAttempt> {
+    const orderId = idOf(order);
+    const currentOrder = this.orders.get(orderId);
+    if (!currentOrder) throw new RepositoryNotFoundError("Order", orderId);
+    if (numberField(currentOrder, "version") !== expectedOrderVersion) {
+      throw new RepositoryConflictError("Order", orderId);
+    }
+
+    const attemptId = idOf(attempt);
+    if (this.paymentAttempts.has(attemptId)) {
+      throw new RepositoryConflictError("PaymentAttempt", attemptId);
+    }
+    const key = textField(attempt, "idempotencyKey");
+    if (
+      key !== undefined &&
+      [...this.paymentAttempts.values()].some(
+        (candidate) =>
+          textField(candidate, "orderId") === orderId &&
+          textField(candidate, "idempotencyKey") === key
+      )
+    ) {
+      throw new RepositoryConflictError("PaymentAttempt idempotency key", key);
+    }
+    this.assertUniqueProviderReference(
+      this.paymentAttempts,
+      "PaymentAttempt provider reference",
+      attempt
+    );
+
+    // No awaits occur between these writes, so the in-memory adapter exposes
+    // the order reservation and attempt creation as one atomic operation.
+    this.orders.set(orderId, cloneAggregate(order));
+    this.paymentAttempts.set(attemptId, cloneAggregate(attempt));
+    return cloneAggregate(attempt);
   }
 
   async getPaymentAttempt(id: string): Promise<PaymentAttempt | undefined> {
@@ -345,10 +390,13 @@ export class MemoryPosRepository implements PosRepository {
       );
     }
     const idempotencyKey = textField(refund, "idempotencyKey");
+    const paymentId = textField(refund, "paymentId");
     if (
       idempotencyKey !== undefined &&
       [...this.refunds.values()].some(
-        (candidate) => textField(candidate, "idempotencyKey") === idempotencyKey
+        (candidate) =>
+          textField(candidate, "paymentId") === paymentId &&
+          textField(candidate, "idempotencyKey") === idempotencyKey
       )
     ) {
       throw new RepositoryConflictError("Refund idempotency key", idempotencyKey);
@@ -558,7 +606,7 @@ export class MemoryPosRepository implements PosRepository {
         .filter(
           (order) =>
             query.locationId === undefined ||
-            textField(order, "locationId") === query.locationId
+            (textField(order, "locationId") ?? "default") === query.locationId
         )
         .map(idOf)
     );
@@ -607,14 +655,28 @@ export class MemoryPosRepository implements PosRepository {
       const snapshot = readSnapshot(batch);
       if (
         snapshot.currency !== currency ||
-        (query.provider !== undefined && snapshot.provider !== query.provider) ||
-        !isInRange(dateField(batch, "periodEnd"), query)
+        (query.provider !== undefined && snapshot.provider !== query.provider)
       ) {
         continue;
       }
       const lines = Array.isArray(snapshot.lines) ? snapshot.lines : [];
       for (const line of lines) {
         const lineSnapshot = readSnapshot(line);
+        if (!isInRange(dateField(line, "occurredAt"), query)) continue;
+
+        if (query.locationId !== undefined) {
+          const directPaymentId =
+            typeof lineSnapshot.paymentId === "string" ? lineSnapshot.paymentId : undefined;
+          const refund =
+            typeof lineSnapshot.refundId === "string"
+              ? this.refunds.get(lineSnapshot.refundId)
+              : undefined;
+          const refundPaymentId = refund ? textField(refund, "paymentId") : undefined;
+          const payment = allPaymentsById.get(directPaymentId ?? refundPaymentId ?? "");
+          const orderId = payment ? textField(payment, "orderId") : undefined;
+          if (orderId === undefined || !eligibleOrders.has(orderId)) continue;
+        }
+
         const gross = moneyField(line, "grossAmount");
         const fee = moneyField(line, "feeAmount");
         const net = moneyField(line, "netAmount");

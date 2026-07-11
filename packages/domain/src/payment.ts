@@ -77,8 +77,10 @@ const PAYMENT_ATTEMPT_TRANSITIONS: Readonly<
   PROCESSING: ["CAPTURED", "DECLINED", "CANCELED", "UNKNOWN"],
   UNKNOWN: ["PROCESSING", "CAPTURED", "DECLINED", "CANCELED"],
   CAPTURED: [],
-  DECLINED: [],
-  CANCELED: [],
+  // A later provider capture is a financial fact and must dominate an
+  // earlier contradictory decline/cancel notification.
+  DECLINED: ["CAPTURED"],
+  CANCELED: ["CAPTURED"],
 };
 
 export class PaymentAttempt {

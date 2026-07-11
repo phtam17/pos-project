@@ -126,6 +126,10 @@ export class PostgresPosRepository implements PosRepository {
   readonly pool: Pool;
   private readonly ownsPool: boolean;
 
+  async healthCheck(): Promise<void> {
+    await this.pool.query("SELECT 1");
+  }
+
   constructor(options: PostgresPosRepositoryOptions) {
     const connectionString = options.connectionString;
     if (!options.pool && !connectionString) {
@@ -148,7 +152,7 @@ export class PostgresPosRepository implements PosRepository {
       values.push(`%${query.search.trim()}%`);
       conditions.push(`(name ILIKE $${values.length} OR sku ILIKE $${values.length})`);
     }
-    values.push(Math.max(0, query.limit ?? 100));
+    values.push(Math.max(0, query.limit ?? 500));
     const limit = `$${values.length}`;
     values.push(Math.max(0, query.offset ?? 0));
     const offset = `$${values.length}`;
@@ -365,6 +369,68 @@ export class PostgresPosRepository implements PosRepository {
       );
       return PaymentAttempt.rehydrate(snapshot);
     } catch (error) {
+      translateWriteError(error, "PaymentAttempt", attempt.id);
+    }
+  }
+
+  async reservePaymentAttempt(
+    order: Order,
+    attempt: PaymentAttempt,
+    expectedOrderVersion: number
+  ): Promise<PaymentAttempt> {
+    const orderSnapshot = order.toSnapshot();
+    const attemptSnapshot = attempt.toSnapshot();
+    try {
+      await inTransaction(this.pool, async (client) => {
+        const orderResult = await client.query(
+          `UPDATE orders
+              SET status = $2, version = $3, snapshot = $4, updated_at = $5,
+                  completed_at = NULL
+            WHERE id = $1 AND version = $6`,
+          [
+            order.id,
+            orderSnapshot.status,
+            orderSnapshot.version,
+            encodeAggregate(order),
+            orderSnapshot.updatedAt,
+            expectedOrderVersion
+          ]
+        );
+        if (!orderResult.rowCount) {
+          const exists = await client.query("SELECT 1 FROM orders WHERE id = $1", [order.id]);
+          if (exists.rowCount) throw new RepositoryConflictError("Order", order.id);
+          throw new RepositoryNotFoundError("Order", order.id);
+        }
+
+        await client.query(
+          `INSERT INTO payment_attempts
+            (id, order_id, provider, provider_reference, terminal_id, status,
+             amount_minor, currency, idempotency_key, failure_code, version,
+             snapshot, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+          [
+            attemptSnapshot.id,
+            attemptSnapshot.orderId,
+            attemptSnapshot.provider,
+            attemptSnapshot.providerReference,
+            attemptSnapshot.terminalId,
+            attemptSnapshot.status,
+            minor(attemptSnapshot.amount),
+            attemptSnapshot.amount.currency,
+            attemptSnapshot.idempotencyKey,
+            attemptSnapshot.failureCode,
+            attemptSnapshot.version,
+            encodeAggregate(attempt),
+            attemptSnapshot.createdAt,
+            attemptSnapshot.updatedAt
+          ]
+        );
+      });
+      return PaymentAttempt.rehydrate(attemptSnapshot);
+    } catch (error) {
+      if (error instanceof RepositoryConflictError || error instanceof RepositoryNotFoundError) {
+        throw error;
+      }
       translateWriteError(error, "PaymentAttempt", attempt.id);
     }
   }
@@ -939,16 +1005,28 @@ export class PostgresPosRepository implements PosRepository {
                   COALESCE(sum(sl.net_minor), 0)::text AS net
              FROM settlement_lines sl
              JOIN settlement_batches sb ON sb.id = sl.batch_id
+             LEFT JOIN payments settled_payment ON settled_payment.id = sl.payment_id
+             LEFT JOIN refunds settled_refund ON settled_refund.id = sl.refund_id
+             LEFT JOIN payments refund_payment ON refund_payment.id = settled_refund.payment_id
+             LEFT JOIN orders settled_order
+               ON settled_order.id = COALESCE(settled_payment.order_id, refund_payment.order_id)
             WHERE sl.occurred_at >= $1 AND sl.occurred_at < $2
               AND sb.currency = $3
-              AND ($4::text IS NULL OR sb.provider = $4)`,
-          params.slice(0, 4)
+              AND ($4::text IS NULL OR sb.provider = $4)
+              AND ($5::text IS NULL OR settled_order.location_id = $5)`,
+          params
         ),
         this.pool.query<IdRow>(
           `SELECT p.id FROM payments p JOIN orders o ON o.id = p.order_id
             WHERE ${paymentFilter} AND p.status <> 'VOIDED'
               AND NOT EXISTS (
-                SELECT 1 FROM settlement_lines sl WHERE sl.payment_id = p.id
+                SELECT 1
+                  FROM settlement_lines sl
+                  JOIN settlement_batches sb ON sb.id = sl.batch_id
+                 WHERE sl.payment_id = p.id
+                   AND sl.occurred_at >= $1 AND sl.occurred_at < $2
+                   AND sb.currency = $3
+                   AND ($4::text IS NULL OR sb.provider = $4)
               ) ORDER BY p.id`,
           params
         ),
@@ -959,7 +1037,13 @@ export class PostgresPosRepository implements PosRepository {
              JOIN orders o ON o.id = p.order_id
             WHERE ${refundFilter}
               AND NOT EXISTS (
-                SELECT 1 FROM settlement_lines sl WHERE sl.refund_id = r.id
+                SELECT 1
+                  FROM settlement_lines sl
+                  JOIN settlement_batches sb ON sb.id = sl.batch_id
+                 WHERE sl.refund_id = r.id
+                   AND sl.occurred_at >= $1 AND sl.occurred_at < $2
+                   AND sb.currency = $3
+                   AND ($4::text IS NULL OR sb.provider = $4)
               ) ORDER BY r.id`,
           params
         )

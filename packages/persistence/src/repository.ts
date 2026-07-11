@@ -69,6 +69,7 @@ export interface ReconciliationSummary {
 }
 
 export interface PosRepository {
+  healthCheck(): Promise<void>;
   listProducts(query?: ProductQuery): Promise<readonly Product[]>;
   getProduct(id: string): Promise<Product | undefined>;
   createProduct(product: Product): Promise<Product>;
@@ -83,6 +84,12 @@ export interface PosRepository {
   saveOrder(order: Order, expectedVersion?: number): Promise<Order>;
 
   createPaymentAttempt(attempt: PaymentAttempt): Promise<PaymentAttempt>;
+  /** Atomically moves an OPEN order to PAYMENT_PENDING and creates its attempt. */
+  reservePaymentAttempt(
+    order: Order,
+    attempt: PaymentAttempt,
+    expectedOrderVersion: number
+  ): Promise<PaymentAttempt>;
   getPaymentAttempt(id: string): Promise<PaymentAttempt | undefined>;
   savePaymentAttempt(
     attempt: PaymentAttempt,
