@@ -94,7 +94,7 @@ export async function runWorkerOnce(options: RunWorkerOptions): Promise<WorkerRe
     else unmatched.push(item.id);
   }
 
-  if (unmatched.length > 0 || lines.length === 0) {
+  if (unmatched.length > 0) {
     return {
       publishedOutbox,
       failedOutbox,
@@ -106,38 +106,62 @@ export async function runWorkerOnce(options: RunWorkerOptions): Promise<WorkerRe
       nextSettlementCursor: options.settlementCursor ?? null
     };
   }
+  if (lines.length === 0) {
+    return {
+      publishedOutbox,
+      failedOutbox,
+      settlementBatches: 0,
+      settlementLines: 0,
+      unmatchedSettlementItems: [],
+      // The page was already committed. Advancing to the provider cursor is
+      // required when a worker crashes after commit but before saving cursor.
+      nextSettlementCursor: page.nextCursor
+    };
+  }
 
-  const pageIdentity = lines.map((line) => line.id).sort().join("|");
-  const batchId = stableId("settlement-batch", `${options.provider.name}:${pageIdentity}`);
-  const batchLines = lines.map((line) => ({ ...line, batchId }));
+  const linesByCurrency = new Map<string, SettlementLineSnapshot[]>();
+  for (const line of lines) {
+    const currency = line.netAmount.currency;
+    const group = linesByCurrency.get(currency) ?? [];
+    group.push(line);
+    linesByCurrency.set(currency, group);
+  }
 
-  const currency = batchLines[0]!.netAmount.currency;
-  const payoutAmount = batchLines.reduce(
-    (sum, line) => sum.add(line.netAmount),
-    Money.zero(currency)
-  );
-  const occurred = batchLines.map((line) => line.occurredAt.getTime());
-  const batch = new SettlementBatch({
-    id: batchId,
-    provider: options.provider.name,
-    providerBatchReference: `${options.provider.name}:${stableId("provider-page", pageIdentity)}`,
-    currency,
-    status: "OPEN",
-    lines: batchLines,
-    payoutAmount,
-    periodStart: new Date(Math.min(...occurred)),
-    periodEnd: new Date(Math.max(...occurred)),
-    createdAt: now(),
-    reconciledAt: null,
-    version: 0
-  });
-  await options.repository.createSettlementBatch(batch);
+  for (const [currency, currencyLines] of linesByCurrency) {
+    const pageIdentity = currencyLines.map((line) => line.id).sort().join("|");
+    const batchId = stableId(
+      "settlement-batch",
+      `${options.provider.name}:${currency}:${pageIdentity}`
+    );
+    const batchLines = currencyLines.map((line) => ({ ...line, batchId }));
+    const payoutAmount = batchLines.reduce(
+      (sum, line) => sum.add(line.netAmount),
+      Money.zero(currency)
+    );
+    const occurred = batchLines.map((line) => line.occurredAt.getTime());
+    const batch = new SettlementBatch({
+      id: batchId,
+      provider: options.provider.name,
+      providerBatchReference:
+        `${options.provider.name}:${currency}:${stableId("provider-page", pageIdentity)}`,
+      currency,
+      status: "OPEN",
+      lines: batchLines,
+      payoutAmount,
+      periodStart: new Date(Math.min(...occurred)),
+      periodEnd: new Date(Math.max(...occurred)),
+      createdAt: now(),
+      reconciledAt: null,
+      version: 0
+    });
+    await options.repository.createSettlementBatch(batch);
+  }
 
   return {
     publishedOutbox,
     failedOutbox,
-    settlementBatches: 1,
-    settlementLines: batchLines.length,
+    settlementBatches: linesByCurrency.size,
+    settlementLines: lines.length,
     unmatchedSettlementItems: unmatched,
     nextSettlementCursor: page.nextCursor
   };
@@ -157,6 +181,7 @@ async function mapSettlementItem(
     const payment = await repository.findPaymentByProviderReference(provider, reference)
       ?? await repository.findPaymentByProviderReference(provider, item.providerReference);
     if (!payment) return undefined;
+    if (!item.grossAmount.equals(payment.amount)) return undefined;
     paymentId = payment.id;
   }
   if (item.kind === "REFUND") {
@@ -164,6 +189,7 @@ async function mapSettlementItem(
     const refund = await repository.findRefundByProviderReference(provider, reference)
       ?? await repository.findRefundByProviderReference(provider, item.providerReference);
     if (!refund) return undefined;
+    if (!item.grossAmount.equals(refund.amount.multiply(-1))) return undefined;
     refundId = refund.id;
   }
 

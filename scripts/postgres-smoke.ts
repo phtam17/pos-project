@@ -2,17 +2,25 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
 import { buildApp } from "../apps/api/src/app.js";
+import { runWorkerOnce } from "../apps/worker/src/worker.js";
+import { SimulatedPaymentProvider } from "@pos/payments-simulated";
+import { createRepository } from "@pos/persistence";
 
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) throw new Error("DATABASE_URL is required");
 
+const repository = createRepository({ databaseUrl });
+const provider = new SimulatedPaymentProvider({ webhookSecret: "postgres-smoke-secret" });
 const app = await buildApp({
   logger: process.env.SMOKE_DEBUG === "true",
+  repository,
+  paymentProvider: provider,
   config: {
     host: "127.0.0.1",
     port: 3000,
     databaseUrl,
     simulatedWebhookSecret: "postgres-smoke-secret",
+    managerApiKey: "postgres-smoke-manager",
     corsOrigins: []
   }
 });
@@ -22,6 +30,7 @@ try {
   assert.equal(productsResponse.statusCode, 200, productsResponse.body);
   const products = productsResponse.json<{ products: Array<{ id: string }> }>().products;
   assert.ok(products.length > 0, "seeded products should be available");
+  const sharedPaymentKey = `payment-${randomUUID()}`;
 
   const cartResponse = await app.inject({ method: "POST", url: "/v1/carts", payload: {} });
   assert.equal(cartResponse.statusCode, 201);
@@ -45,7 +54,7 @@ try {
   const paymentResponse = await app.inject({
     method: "POST",
     url: `/v1/orders/${orderId}/payment-attempts`,
-    headers: { "idempotency-key": `payment-${randomUUID()}` },
+    headers: { "idempotency-key": sharedPaymentKey },
     payload: { tender: "cash" }
   });
   assert.equal(paymentResponse.statusCode, 201);
@@ -58,11 +67,70 @@ try {
   assert.equal(receiptResponse.statusCode, 200);
   assert.equal(receiptResponse.json<{ paymentStatus: string }>().paymentStatus, "CAPTURED");
 
+  // A second cart with the same product protects against globally-colliding
+  // cart/order line identifiers in the normalized PostgreSQL tables.
+  const secondCartId = (await app.inject({ method: "POST", url: "/v1/carts", payload: {} }))
+    .json<{ id: string }>().id;
+  assert.equal((await app.inject({
+    method: "POST",
+    url: `/v1/carts/${secondCartId}/lines`,
+    payload: { productId: products[0]!.id, quantity: 1 }
+  })).statusCode, 201);
+  const secondOrderId = (await app.inject({
+    method: "POST",
+    url: `/v1/carts/${secondCartId}/checkout`,
+    headers: { "idempotency-key": `checkout-${randomUUID()}` }
+  })).json<{ id: string }>().id;
+  const cardPaymentResponse = await app.inject({
+    method: "POST",
+    url: `/v1/orders/${secondOrderId}/payment-attempts`,
+    // Client keys are scoped to an order; migration 002 enforces the same
+    // boundary in PostgreSQL rather than treating keys as globally unique.
+    headers: { "idempotency-key": sharedPaymentKey },
+    payload: { tender: "card", terminalId: "postgres-smoke-reader" }
+  });
+  assert.equal(cardPaymentResponse.statusCode, 201, cardPaymentResponse.body);
+  const cardPayment = cardPaymentResponse.json<{
+    paymentId: string;
+    amountMinor: string;
+    status: string;
+  }>();
+  assert.equal(cardPayment.status, "CAPTURED");
+  const refundResponse = await app.inject({
+    method: "POST",
+    url: `/v1/payments/${cardPayment.paymentId}/refunds`,
+    headers: {
+      "idempotency-key": `refund-${randomUUID()}`,
+      "x-manager-id": "postgres-smoke-manager",
+      "x-manager-key": "postgres-smoke-manager"
+    },
+    payload: { amountMinor: cardPayment.amountMinor, reason: "PostgreSQL smoke refund" }
+  });
+  assert.equal(refundResponse.statusCode, 201, refundResponse.body);
+
+  const worker = await runWorkerOnce({
+    repository,
+    provider,
+    publish: async () => undefined
+  });
+  assert.equal(worker.unmatchedSettlementItems.length, 0);
+  assert.equal(worker.settlementLines, 2);
+  const reconciliation = await repository.reconciliationSummary({
+    from: new Date(Date.now() - 60_000),
+    to: new Date(Date.now() + 60_000),
+    currency: "USD",
+    provider: provider.name
+  });
+  assert.equal(reconciliation.unreconciledPaymentIds.length, 0);
+  assert.equal(reconciliation.unreconciledRefundIds.length, 0);
+
   console.info(JSON.stringify({
     status: "ok",
     persistence: "postgres",
     productCount: products.length,
-    orderId
+    orderId,
+    secondOrderId,
+    settlementLines: worker.settlementLines
   }));
 } finally {
   await app.close();
