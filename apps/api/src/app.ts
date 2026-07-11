@@ -85,16 +85,27 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
   await app.register(cors, {
     origin: config.corsOrigins.length === 0 ? false : [...config.corsOrigins],
-    allowedHeaders: ["Content-Type", "Idempotency-Key", "X-Manager-Id"],
+    allowedHeaders: ["Content-Type", "Idempotency-Key", "X-Manager-Id", "X-Manager-Key"],
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
   });
 
   app.get("/health", async () => ({
-    status: "ok",
+    status: "live",
     paymentProvider: provider.name,
     persistence: config.databaseUrl ? "postgres" : "memory",
     timestamp: new Date().toISOString()
   }));
+
+  app.get("/ready", async (_request, reply) => {
+    try {
+      await repository.healthCheck();
+      return { status: "ready", persistence: config.databaseUrl ? "postgres" : "memory" };
+    } catch {
+      return reply.code(503).send({
+        error: { code: "NOT_READY", message: "Persistence is unavailable" }
+      });
+    }
+  });
 
   app.get("/v1/payment-capabilities", async () => ({
     provider: provider.name,
@@ -102,10 +113,17 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   }));
 
   app.get("/v1/products", async (request) => {
-    const query = z.object({ search: z.string().trim().max(160).optional() })
+    const query = z.object({
+      search: z.string().trim().max(160).optional(),
+      limit: z.coerce.number().int().min(1).max(500).default(500),
+      offset: z.coerce.number().int().min(0).default(0)
+    })
       .parse(request.query);
-    const products = await service.listProducts(query.search);
-    return { products: products.map(productDto) };
+    const products = await service.listProducts(query.search, query.limit, query.offset);
+    return {
+      products: products.map(productDto),
+      page: { limit: query.limit, offset: query.offset, returned: products.length }
+    };
   });
 
   app.post("/v1/products", async (request, reply) => {
@@ -191,11 +209,22 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     const body = refundSchema.parse(request.body);
     const idempotencyKey = idempotencyKeySchema.parse(request.headers["idempotency-key"]);
     const managerId = z.string().trim().min(1).parse(request.headers["x-manager-id"]);
+    if (!config.managerApiKey) {
+      throw new ApplicationError(
+        "Refunds are disabled until MANAGER_API_KEY is configured",
+        "REFUNDS_DISABLED",
+        503
+      );
+    }
+    if (request.headers["x-manager-key"] !== config.managerApiKey) {
+      throw new ApplicationError("Manager authorization failed", "FORBIDDEN", 403);
+    }
     const result = await service.refundPayment({
       paymentId: id,
       amountMinor: body.amountMinor,
-      reason: `${body.reason} (approved by ${managerId})`,
-      idempotencyKey
+      reason: body.reason,
+      idempotencyKey,
+      actorId: managerId
     });
     if (result.replayed) reply.header("Idempotent-Replayed", "true");
     return reply.code(result.replayed ? 200 : 201).send(refundDto(result.refund));

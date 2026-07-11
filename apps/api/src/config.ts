@@ -3,6 +3,7 @@ export interface ApiConfig {
   readonly port: number;
   readonly databaseUrl?: string;
   readonly simulatedWebhookSecret: string;
+  readonly managerApiKey?: string;
   readonly corsOrigins: readonly string[];
 }
 
@@ -13,6 +14,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
   }
 
   const databaseUrl = env.DATABASE_URL?.trim();
+  const managerApiKey = env.MANAGER_API_KEY?.trim();
   const origins = (env.CORS_ORIGINS ?? "http://127.0.0.1:5173,http://localhost:5173")
     .split(",")
     .map((origin) => origin.trim())
@@ -23,6 +25,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     port,
     ...(databaseUrl ? { databaseUrl } : {}),
     simulatedWebhookSecret: env.SIMULATED_WEBHOOK_SECRET?.trim() || "development-only-secret",
+    ...(managerApiKey ? { managerApiKey } : {}),
     corsOrigins: origins
   };
 }
