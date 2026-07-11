@@ -26,14 +26,22 @@ Only provider references and receipt-safe metadata explicitly documented by the 
 - Redact structured logs and add automated tests that fail when prohibited field names or card-like values appear.
 - Patch terminals and applications, monitor dependencies, rotate credentials, and maintain incident-response contacts.
 
-## Threats covered in tests
+## Behaviors covered in tests
 
 - duplicate Pay clicks and idempotency-key misuse;
+- concurrent payment keys, stale provider-status races, and crashes immediately after an idempotency claim;
 - process or network failure after card presentation;
-- forged, duplicate, delayed, and out-of-order provider events;
 - refund totals exceeding captured totals;
 - invalid cart/order/payment state transitions;
-- cross-location and unauthorized manager operations;
-- accidental payment data in request bodies and logs.
+- raw card-like fields at the HTTP and provider-adapter boundaries;
+- malformed JSON, provider-response loss, paginated settlement replay, multi-currency batches, and settlement amount mismatches.
+
+## Production security work still required
+
+- Persist and deduplicate forged, duplicate, delayed, and out-of-order provider events.
+- Add authenticated staff/device identity, trusted RBAC, location isolation, and manager approval. `MANAGER_API_KEY` only gates the demo refund endpoint; it is not a complete identity system.
+- Add automated log/trace leakage scanning and verify that analytics and support tooling cannot receive account data.
+- Make aggregate, idempotency, audit, and outbox writes one database transaction per use case.
+- Reject simulator, memory persistence, default secrets, and missing identity configuration at production startup.
 
 Before deployment, document the complete data flow and obtain the applicable PCI DSS validation instructions from the acquirer.

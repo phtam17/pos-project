@@ -30,8 +30,12 @@ Module boundaries are ordinary TypeScript packages so they remain easy to test a
 - Money mutations require an `Idempotency-Key` scoped to operation and merchant.
 - Reusing the same key with a different canonical request hash is rejected.
 - Domain state transitions reject duplicates and invalid reversals.
-- Provider events use an inbox/event identifier for deduplication.
-- Domain changes and outbox writes share the repository transaction boundary in PostgreSQL.
+- Idempotency claims are atomic in both repository adapters; PostgreSQL uses `INSERT ... ON CONFLICT DO NOTHING`.
+- Reserving an order for payment creates its attempt in the same PostgreSQL transaction; refund capacity is likewise locked and reserved transactionally.
+- Replays can reconstruct an operation if a process dies after its idempotency claim but before its financial reservation is committed.
+- The outbox worker atomically claims rows and records publish failures before retry.
+
+The current skeleton does **not** yet wrap every use-case aggregate change, audit entry, and outbox insert in one PostgreSQL transaction. It also verifies provider webhooks but does not yet persist a unique provider-event inbox. Both are required before a real-card production deployment.
 
 ## Offline policy
 
@@ -40,3 +44,5 @@ The MVP does not accept cards offline. The register can retain a cart locally, b
 ## Provider replacement
 
 Implement `PaymentProvider` and pass its shared contract tests. Capability flags must remain explicit: the application must not assume every provider supports offline authorization, partial authorization, separate capture, unreferenced refunds, tipping, or all card brands.
+
+The standalone worker cannot retrieve settlement state from the in-memory simulator used by a separate API process. Worker settlement tests inject the same provider instance; a real deployment must use the selected provider's durable settlement API and persist its cursor.

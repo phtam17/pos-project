@@ -4,6 +4,8 @@ A processor-neutral point-of-sale starter for a single merchant. It deliberately
 
 The included payment provider is a simulator. It is suitable for development only and must be replaced by a certified terminal/provider integration before accepting live cards.
 
+This repository is an executable engineering skeleton, not a production-ready or PCI-certified POS. Authentication/RBAC, transactional webhook inbox processing, fully atomic financial finalization, and a real provider's durable settlement cursor remain deployment work.
+
 ## What is included
 
 - React register interface for products, cart, checkout, cash, and simulated card payments.
@@ -37,6 +39,8 @@ The simulator uses the final two cents of the total:
 
 No card number, CVV, PIN, track data, or EMV data is collected by this project.
 
+The refund endpoint is disabled unless `MANAGER_API_KEY` is configured. The key is a development safeguard, not a substitute for staff authentication and RBAC.
+
 ## Run with PostgreSQL
 
 ```sh
@@ -54,6 +58,8 @@ Root scripts load `.env` when it exists. The register build also reads its `VITE
 ```sh
 npm run verify
 ```
+
+`GET /health` is a process liveness check. `GET /ready` also checks the configured repository.
 
 ## Workspace layout
 
