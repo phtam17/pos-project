@@ -31,6 +31,10 @@ npm run dev
 
 Open `http://127.0.0.1:5173`. With no `DATABASE_URL`, the API uses an in-memory repository populated with sample products.
 
+If an existing `.env` contains a PostgreSQL URL but Docker is not running, set
+`PERSISTENCE_MODE=memory`. This explicitly selects the zero-setup sandbox and
+prevents the API from trying the inactive database.
+
 The simulator uses the final two cents of the total:
 
 - `01` returns a decline.
@@ -62,6 +66,7 @@ The refund endpoint is disabled unless `MANAGER_API_KEY` is configured. The key 
 
 ```sh
 cp .env.example .env
+# Ensure PERSISTENCE_MODE=postgres in .env.
 docker compose up -d postgres
 npm run db:migrate
 npm run db:seed

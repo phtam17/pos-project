@@ -60,8 +60,11 @@ const paymentIdParams = z.object({ id: identifierSchema });
 
 export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyInstance> {
   const config = options.config ?? loadConfig();
+  const persistenceMode = config.persistenceMode ?? (config.databaseUrl ? "postgres" : "memory");
   const repository = options.repository ?? createRepository({
-    ...(config.databaseUrl ? { databaseUrl: config.databaseUrl } : {})
+    // An explicit empty value prevents the persistence factory from falling
+    // back to a stale DATABASE_URL when sandbox memory mode is selected.
+    databaseUrl: persistenceMode === "postgres" ? config.databaseUrl ?? "" : ""
   });
   const cardProvider = options.paymentProvider ?? new SimulatedPaymentProvider({
     webhookSecret: config.simulatedWebhookSecret
@@ -99,14 +102,14 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   app.get("/health", async () => ({
     status: "live",
     paymentProviders: providers.map((provider) => provider.name),
-    persistence: config.databaseUrl ? "postgres" : "memory",
+    persistence: persistenceMode,
     timestamp: new Date().toISOString()
   }));
 
   app.get("/ready", async (_request, reply) => {
     try {
       await repository.healthCheck();
-      return { status: "ready", persistence: config.databaseUrl ? "postgres" : "memory" };
+      return { status: "ready", persistence: persistenceMode };
     } catch {
       return reply.code(503).send({
         error: { code: "NOT_READY", message: "Persistence is unavailable" }
@@ -349,6 +352,13 @@ function mapError(error: unknown): { status: number; code: string; message: stri
             : 502;
     return { status, code: error.code, message: error.message };
   }
+  if (isPersistenceConnectionError(error)) {
+    return {
+      status: 503,
+      code: "PERSISTENCE_UNAVAILABLE",
+      message: "Persistence is unavailable. Start PostgreSQL or set PERSISTENCE_MODE=memory for the sandbox demo."
+    };
+  }
   if (
     error !== null &&
     typeof error === "object" &&
@@ -367,4 +377,17 @@ function mapError(error: unknown): { status: number; code: string; message: stri
     };
   }
   return { status: 500, code: "INTERNAL_ERROR", message: "An unexpected error occurred" };
+}
+
+function isPersistenceConnectionError(error: unknown): boolean {
+  if (error === null || typeof error !== "object" || !("code" in error)) return false;
+  return typeof error.code === "string" && [
+    "ECONNREFUSED",
+    "ECONNRESET",
+    "ENOTFOUND",
+    "ETIMEDOUT",
+    "57P01",
+    "57P02",
+    "57P03"
+  ].includes(error.code);
 }

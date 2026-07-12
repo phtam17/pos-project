@@ -35,6 +35,22 @@ async function app(paymentProvider?: SimulatedPaymentProvider) {
 }
 
 describe("POS API vertical slice", () => {
+  it("lets sandbox memory mode override a configured PostgreSQL URL", async () => {
+    const instance = await buildApp({
+      config: {
+        ...config,
+        persistenceMode: "memory",
+        databaseUrl: "postgres://unavailable.example.invalid/pos"
+      },
+      logger: false
+    });
+    openApps.push(instance);
+    const health = await instance.inject({ method: "GET", url: "/health" });
+    const products = await instance.inject({ method: "GET", url: "/v1/products" });
+    expect(health.json<{ persistence: string }>().persistence).toBe("memory");
+    expect(products.statusCode).toBe(200);
+  });
+
   it("separates liveness from persistence readiness", async () => {
     class UnreadyRepository extends MemoryPosRepository {
       override async healthCheck(): Promise<void> {
