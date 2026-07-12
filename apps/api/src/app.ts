@@ -6,7 +6,10 @@ import {
 } from "@pos/application";
 import { DomainError } from "@pos/domain";
 import { PaymentProviderError, type PaymentProvider } from "@pos/payment-contract";
-import { SimulatedPaymentProvider } from "@pos/payments-simulated";
+import {
+  SimulatedPaymentProvider,
+  SimulatedVietnamQrProvider
+} from "@pos/payments-simulated";
 import {
   PersistenceError,
   createRepository,
@@ -31,7 +34,8 @@ import {
   idempotencyKeySchema,
   identifierSchema,
   paymentAttemptSchema,
-  refundSchema
+  refundSchema,
+  sandboxVietnamQrCompletionSchema
 } from "./schemas.js";
 
 declare module "fastify" {
@@ -44,6 +48,7 @@ export interface BuildAppOptions {
   readonly config?: ApiConfig;
   readonly repository?: PosRepository;
   readonly paymentProvider?: PaymentProvider;
+  readonly paymentProviders?: readonly PaymentProvider[];
   readonly logger?: boolean;
 }
 
@@ -58,10 +63,12 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   const repository = options.repository ?? createRepository({
     ...(config.databaseUrl ? { databaseUrl: config.databaseUrl } : {})
   });
-  const provider = options.paymentProvider ?? new SimulatedPaymentProvider({
+  const cardProvider = options.paymentProvider ?? new SimulatedPaymentProvider({
     webhookSecret: config.simulatedWebhookSecret
   });
-  const service = new PosService(repository, provider);
+  const sandboxVietnamQrProvider = new SimulatedVietnamQrProvider();
+  const providers = options.paymentProviders ?? [cardProvider, sandboxVietnamQrProvider];
+  const service = new PosService(repository, providers);
   const app = Fastify({ logger: options.logger ?? true, bodyLimit: 1_048_576 });
 
   app.removeContentTypeParser("application/json");
@@ -91,7 +98,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
   app.get("/health", async () => ({
     status: "live",
-    paymentProvider: provider.name,
+    paymentProviders: providers.map((provider) => provider.name),
     persistence: config.databaseUrl ? "postgres" : "memory",
     timestamp: new Date().toISOString()
   }));
@@ -108,8 +115,10 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
 
   app.get("/v1/payment-capabilities", async () => ({
-    provider: provider.name,
-    capabilities: provider.capabilities
+    providers: providers.map((provider) => ({
+      provider: provider.name,
+      capabilities: provider.capabilities
+    }))
   }));
 
   app.get("/v1/products", async (request) => {
@@ -182,7 +191,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     });
     if (result.replayed) reply.header("Idempotent-Replayed", "true");
     return reply.code(result.replayed ? 200 : 201).send(
-      paymentAttemptDto(result.attempt, result.payment)
+      paymentAttemptDto(result.attempt, result.payment, result.presentation, result.wallet)
     );
   });
 
@@ -191,12 +200,26 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     const refresh = z.object({ refresh: z.enum(["true", "false"]).optional() })
       .parse(request.query).refresh !== "false";
     const result = await service.getPaymentAttempt(id, refresh);
-    return paymentAttemptDto(result.attempt, result.payment);
+    return paymentAttemptDto(result.attempt, result.payment, result.presentation, result.wallet);
   });
 
   app.post("/v1/payment-attempts/:id/cancel", async (request) => {
     const { id } = attemptIdParams.parse(request.params);
     return paymentAttemptDto(await service.cancelPaymentAttempt(id));
+  });
+
+  app.post("/v1/sandbox/vietnam-qr/:id/complete", async (request) => {
+    const { id } = attemptIdParams.parse(request.params);
+    const body = sandboxVietnamQrCompletionSchema.parse(request.body);
+    const provider = providers.find(
+      (candidate): candidate is SimulatedVietnamQrProvider => candidate instanceof SimulatedVietnamQrProvider
+    );
+    if (!provider) {
+      throw new ApplicationError("Vietnam QR sandbox is not enabled", "SANDBOX_NOT_ENABLED", 404);
+    }
+    await provider.completeSandboxPayment(id, body.wallet, body.outcome);
+    const result = await service.getPaymentAttempt(id, true);
+    return paymentAttemptDto(result.attempt, result.payment, result.presentation, result.wallet);
   });
 
   app.get("/v1/payments/:id", async (request) => {

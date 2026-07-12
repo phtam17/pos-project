@@ -7,7 +7,9 @@ The project starts as a modular monolith. The HTTP API owns pricing, totals, ord
 ```text
 Register UI ---> API ---> repository ---> PostgreSQL
                   |
-                  +---> PaymentProvider ---> certified provider/terminal
+                  +---> PaymentProvider registry
+                           |---> certified card provider/terminal
+                           +---> cross-border QR acquirer
                   ^              |
                   |              v
                   +--------- signed webhook
@@ -43,6 +45,11 @@ The MVP does not accept cards offline. The register can retain a cart locally, b
 
 ## Provider replacement
 
-Implement `PaymentProvider` and pass its shared contract tests. Capability flags must remain explicit: the application must not assume every provider supports offline authorization, partial authorization, separate capture, unreferenced refunds, tipping, or all card brands.
+Implement `PaymentProvider` and pass its shared contract tests. Providers declare whether they handle cards or Vietnam QR, and the application routes subsequent status, cancel, and refund operations using the provider recorded on the attempt. Capability flags must remain explicit: the application must not assume every provider supports offline authorization, partial authorization, separate capture, unreferenced refunds, tipping, or all card brands.
+
+The included Vietnam QR provider is a sandbox demonstrator. It creates a real QR
+image containing a test URL, then exposes explicit VCB, MoMo, ZaloPay, and ShopeePay
+approval controls. A production adapter must replace those controls with an
+acquirer's signed notification and authenticated status APIs.
 
 The standalone worker cannot retrieve settlement state from the in-memory simulator used by a separate API process. Worker settlement tests inject the same provider instance; a real deployment must use the selected provider's durable settlement API and persist its cursor.

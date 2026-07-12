@@ -8,7 +8,28 @@ import type {
 
 export type PaymentResultStatus = Exclude<PaymentAttemptStatus, "CREATED">;
 
+export type PaymentMethodKind = "CARD" | "VIETNAM_QR";
+export type VietnamQrWallet = "VCB" | "MOMO" | "ZALOPAY" | "SHOPEEPAY_VN";
+
+export interface QrPaymentPresentation {
+  readonly type: "QR_CODE";
+  readonly payload: string;
+  readonly expiresAt: Date;
+  readonly supportedWallets: readonly VietnamQrWallet[];
+  readonly sandbox: boolean;
+}
+
+export type PaymentPresentation = QrPaymentPresentation;
+
+export interface WalletPaymentSummary {
+  readonly wallet: VietnamQrWallet;
+  readonly payerCurrency: "VND";
+  readonly payerAmountMinor: string;
+  readonly exchangeRate: string;
+}
+
 export interface PaymentCapabilities {
+  readonly paymentMethods?: readonly PaymentMethodKind[];
   readonly cardBrands: readonly CardBrand[];
   readonly entryMethods: readonly Exclude<CardEntryMethod, "UNKNOWN">[];
   readonly supportsCancellation: boolean;
@@ -39,6 +60,8 @@ export interface PaymentResult {
   readonly failureMessage: string | null;
   /** Masked, non-sensitive display data only. */
   readonly card: CardSummary | null;
+  readonly presentation?: QrPaymentPresentation;
+  readonly wallet?: WalletPaymentSummary;
   readonly processedAt: Date;
 }
 

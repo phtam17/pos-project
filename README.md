@@ -2,16 +2,16 @@
 
 A processor-neutral point-of-sale starter for a single merchant. It deliberately keeps payment-card data outside the application: the register sends an amount and merchant reference to a payment-provider adapter and stores only the provider result and receipt-safe metadata.
 
-The included payment provider is a simulator. It is suitable for development only and must be replaced by a certified terminal/provider integration before accepting live cards.
+The included card and Vietnam QR providers are simulators. They are suitable for development only and must be replaced by contracted, certified provider integrations before accepting live payments.
 
 This repository is an executable engineering skeleton, not a production-ready or PCI-certified POS. Authentication/RBAC, transactional webhook inbox processing, fully atomic financial finalization, and a real provider's durable settlement cursor remain deployment work.
 
 ## What is included
 
-- React register interface for products, cart, checkout, cash, and simulated card payments.
+- React register interface for products, cart, checkout, cash, simulated card payments, and a Vietnam QR sandbox.
 - Fastify API with authoritative totals, idempotent money mutations, refunds, receipts, webhooks, and health endpoints.
 - Domain state machines for carts, orders, payment attempts, payments, and refunds.
-- Provider-neutral payment contract plus a deterministic simulated terminal.
+- Provider-neutral payment contracts plus deterministic card and Vietnam QR simulators.
 - In-memory persistence for a zero-setup demo and PostgreSQL persistence for durable environments.
 - Outbox, audit, and reconciliation foundations.
 - Tests for money calculations, transitions, idempotency, payment failures, and API workflows.
@@ -38,6 +38,23 @@ The simulator uses the final two cents of the total:
 - Every other amount succeeds.
 
 No card number, CVV, PIN, track data, or EMV data is collected by this project.
+
+## Try the Vietnam QR sandbox
+
+The zero-setup demo includes a separate `Vietnam QR` tender that models the proposed
+Alipay+ flow without moving real money:
+
+1. Add products to the cart and select **Vietnam QR**.
+2. The register creates an order-specific, expiring QR code.
+3. Choose **VCB Digibank**, **MoMo**, **ZaloPay**, or **ShopeePay VN** to simulate
+   that app sending a signed approval.
+4. Use **Simulate decline** or **Expire / cancel QR** to exercise recovery paths.
+5. An approved payment produces a normal receipt labeled with the selected wallet.
+
+The displayed QR encodes a sandbox URL and cannot be paid by a real banking app. The
+simulator uses an illustrative VND rate of 25,500 VND/USD and a 2.5% settlement fee
+so FX, fee, refund, and reconciliation behavior can be developed before an acquirer
+provides real sandbox credentials. Neither value is a commercial quote.
 
 The refund endpoint is disabled unless `MANAGER_API_KEY` is configured. The key is a development safeguard, not a substitute for staff authentication and RBAC.
 

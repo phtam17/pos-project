@@ -7,6 +7,7 @@ import {
   type KeyboardEvent,
   type SVGProps
 } from "react";
+import QRCode from "qrcode";
 
 import {
   ApiError,
@@ -18,13 +19,15 @@ import {
   type PaymentAttemptDto,
   type ProductDto,
   type ReceiptDto,
-  type Tender
+  type Tender,
+  type VietnamQrWallet
 } from "./api";
 
 type PaymentPhase =
   | "idle"
   | "checking-out"
   | "awaiting-card"
+  | "awaiting-qr"
   | "processing"
   | "captured"
   | "declined"
@@ -79,6 +82,7 @@ function Icon({ name, ...props }: SVGProps<SVGSVGElement> & { name: string }) {
       {name === "trash" && <><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5" {...common} /></>}
       {name === "card" && <><rect x="3" y="5" width="18" height="14" rx="2.5" {...common} /><path d="M3 10h18M7 15h4" {...common} /></>}
       {name === "cash" && <><rect x="3" y="6" width="18" height="13" rx="2" {...common} /><path d="M7 9h10M7 16h10" {...common} /><circle cx="12" cy="12.5" r="2.5" {...common} /></>}
+      {name === "qr" && <><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4z" {...common} /><path d="M14 14h2v2h-2zM18 14h2v6h-2M14 18h2v2h-2" {...common} /></>}
       {name === "receipt" && <><path d="M6 3h12v18l-3-2-3 2-3-2-3 2V3Z" {...common} /><path d="M9 8h6M9 12h6M9 16h3" {...common} /></>}
       {name === "orders" && <><rect x="4" y="4" width="16" height="16" rx="3" {...common} /><path d="M8 9h8M8 13h8M8 17h5" {...common} /></>}
       {name === "chevron" && <path d="m9 6 6 6-6 6" {...common} />}
@@ -156,7 +160,8 @@ function fallbackReceipt(order: OrderDto, payment: PaymentAttemptDto): ReceiptDt
     tender: payment.tender,
     paymentStatus: payment.status,
     ...(payment.cardBrand ? { cardBrand: payment.cardBrand } : {}),
-    ...(payment.last4 ? { last4: payment.last4 } : {})
+    ...(payment.last4 ? { last4: payment.last4 } : {}),
+    ...(payment.wallet ? { wallet: payment.wallet } : {})
   };
 }
 
@@ -174,7 +179,9 @@ function ReceiptDialog({ receipt, onClose }: { receipt: ReceiptDto; onClose: () 
 
   const paymentLabel = receipt.tender === "card"
     ? `${receipt.cardBrand ?? "Card"}${receipt.last4 ? ` •••• ${receipt.last4}` : ""}`
-    : receipt.tender === "cash"
+    : receipt.tender === "vietnam_qr"
+      ? `Vietnam QR · ${walletLabel(receipt.wallet)}`
+      : receipt.tender === "cash"
       ? "Cash · Exact amount"
       : "Payment received";
 
@@ -226,6 +233,91 @@ function ReceiptDialog({ receipt, onClose }: { receipt: ReceiptDto; onClose: () 
   );
 }
 
+function walletLabel(wallet?: VietnamQrWallet): string {
+  if (wallet === "VCB") return "VCB Digibank";
+  if (wallet === "MOMO") return "MoMo";
+  if (wallet === "ZALOPAY") return "ZaloPay";
+  if (wallet === "SHOPEEPAY_VN") return "ShopeePay VN";
+  return "Vietnamese wallet";
+}
+
+function SandboxQrPanel({
+  payment,
+  amountMinor,
+  currency,
+  busy,
+  onComplete
+}: {
+  payment: PaymentAttemptDto;
+  amountMinor: AmountMinor;
+  currency: string;
+  busy: boolean;
+  onComplete: (wallet: VietnamQrWallet, outcome: "APPROVED" | "DECLINED" | "EXPIRED") => void;
+}) {
+  const [qrImage, setQrImage] = useState<string | null>(null);
+  const [secondsLeft, setSecondsLeft] = useState(0);
+  const presentation = payment.presentation;
+
+  useEffect(() => {
+    if (!presentation) return;
+    let active = true;
+    void QRCode.toDataURL(presentation.payload, {
+      width: 228,
+      margin: 2,
+      errorCorrectionLevel: "M",
+      color: { dark: "#13251d", light: "#ffffff" }
+    }).then((value) => {
+      if (active) setQrImage(value);
+    });
+    return () => { active = false; };
+  }, [presentation]);
+
+  useEffect(() => {
+    if (!presentation) return;
+    const update = () => {
+      const remaining = Math.max(0, Math.ceil((new Date(presentation.expiresAt).getTime() - Date.now()) / 1000));
+      setSecondsLeft(remaining);
+    };
+    update();
+    const timer = window.setInterval(update, 1000);
+    return () => window.clearInterval(timer);
+  }, [presentation]);
+
+  if (!presentation) return null;
+  const estimatedVnd = Math.round(Number(amountMinor) * 255);
+
+  return (
+    <section className="sandbox-qr" aria-labelledby="sandbox-qr-title">
+      <div className="sandbox-qr-heading">
+        <div><span className="sandbox-badge">Sandbox demo</span><h3 id="sandbox-qr-title">Scan with a Vietnam payment app</h3></div>
+        <strong>{formatMoney(amountMinor, currency)}</strong>
+      </div>
+      <div className="sandbox-qr-body">
+        <div className="qr-frame">
+          {qrImage ? <img src={qrImage} alt="Sandbox Vietnam QR payment code" /> : <span className="spinner" />}
+          <small>Expires in {Math.floor(secondsLeft / 60)}:{String(secondsLeft % 60).padStart(2, "0")}</small>
+        </div>
+        <div className="qr-instructions">
+          <p>In production, the customer scans this order-specific code and approves approximately <strong>{new Intl.NumberFormat("vi-VN", { style: "currency", currency: "VND", maximumFractionDigits: 0 }).format(estimatedVnd)}</strong>.</p>
+          <span>Choose a wallet below to simulate its signed payment confirmation:</span>
+          <div className="wallet-grid">
+            {presentation.supportedWallets.map((wallet) => (
+              <button key={wallet} type="button" disabled={busy} onClick={() => onComplete(wallet, "APPROVED")}>
+                <b>{walletLabel(wallet)}</b><small>Simulate approval</small>
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+      <div className="sandbox-qr-controls">
+        <button type="button" disabled={busy} onClick={() => onComplete("VCB", "DECLINED")}>Simulate decline</button>
+        <button type="button" disabled={busy} onClick={() => onComplete("VCB", "EXPIRED")}>Expire / cancel QR</button>
+      </div>
+      <p className="sandbox-warning"><Icon name="alert" /> This QR contains a test URL and cannot move money or be paid by a real banking app.</p>
+    </section>
+  );
+}
+
 function CartLine({
   line,
   currency,
@@ -274,6 +366,7 @@ export function App() {
   const [notice, setNotice] = useState<string | null>(null);
   const [paymentState, setPaymentState] = useState<PaymentState>(EMPTY_PAYMENT);
   const [pendingPayment, setPendingPayment] = useState<PendingPayment | null>(null);
+  const [qrAttempt, setQrAttempt] = useState<PaymentAttemptDto | null>(null);
   const [pendingCheckout, setPendingCheckout] = useState<PendingCheckout | null>(null);
   const [receipt, setReceipt] = useState<ReceiptDto | null>(null);
   const [recentSales, setRecentSales] = useState<RecentSale[]>([]);
@@ -377,8 +470,12 @@ export function App() {
     setPageError(null);
     setPendingPayment(pending);
     setPaymentState({
-      phase: pending.tender === "card" ? "awaiting-card" : "processing",
-      message: pending.tender === "card" ? "Ask the customer to tap or insert their card." : "Recording exact cash tender…"
+      phase: pending.tender === "card" ? "awaiting-card" : pending.tender === "vietnam_qr" ? "awaiting-qr" : "processing",
+      message: pending.tender === "card"
+        ? "Ask the customer to tap or insert their card."
+        : pending.tender === "vietnam_qr"
+          ? "Creating a one-time Vietnam QR code…"
+          : "Recording exact cash tender…"
     });
 
     try {
@@ -389,7 +486,14 @@ export function App() {
         pending.tender === "card" ? TERMINAL_ID : undefined
       );
 
-      if (SUCCESS_STATUSES.has(payment.status)) {
+      if (payment.presentation && payment.tender === "vietnam_qr") {
+        setQrAttempt(payment);
+        setPaymentState({
+          phase: "awaiting-qr",
+          message: "Waiting for the selected Vietnamese app to confirm payment."
+        });
+      } else if (SUCCESS_STATUSES.has(payment.status)) {
+        setQrAttempt(null);
         await completePayment(pending, payment);
       } else if (DECLINED_STATUSES.has(payment.status)) {
         setPaymentState({
@@ -415,6 +519,36 @@ export function App() {
             phase: "unknown",
             message: `${errorMessage(error)} The result may be unknown; do not start a second charge.`
           });
+    } finally {
+      setPaymentBusy(false);
+    }
+  };
+
+  const completeSandboxQr = async (
+    wallet: VietnamQrWallet,
+    outcome: "APPROVED" | "DECLINED" | "EXPIRED"
+  ) => {
+    if (!qrAttempt || !pendingPayment || paymentBusy) return;
+    setPaymentBusy(true);
+    setPageError(null);
+    try {
+      const payment = await api.completeSandboxVietnamQr(qrAttempt.id, wallet, outcome);
+      setQrAttempt(null);
+      if (SUCCESS_STATUSES.has(payment.status)) {
+        await completePayment(pendingPayment, payment);
+      } else {
+        setPaymentState({
+          phase: "declined",
+          message: payment.failureMessage ?? (outcome === "EXPIRED"
+            ? "The QR code expired without moving money."
+            : "The sandbox customer declined the payment.")
+        });
+      }
+    } catch (error) {
+      setPaymentState({
+        phase: "unknown",
+        message: `${errorMessage(error)} Check the same attempt before trying another payment.`
+      });
     } finally {
       setPaymentBusy(false);
     }
@@ -488,6 +622,7 @@ export function App() {
       const nextCart = await api.createCart();
       setCart(nextCart);
       setPendingPayment(null);
+      setQrAttempt(null);
       setPendingCheckout(null);
       setPaymentState(EMPTY_PAYMENT);
       setReceipt(null);
@@ -637,7 +772,7 @@ export function App() {
                   <li key={sale.order.id}>
                     <button className="sale-summary" type="button" onClick={() => void showRecentReceipt(sale)}>
                       <span className="activity-icon success"><Icon name="check" /></span>
-                      <span><strong>Order #{sale.order.number}</strong><small>{formatDate(sale.payment.createdAt ?? sale.order.createdAt)} · {sale.payment.tender === "card" ? sale.payment.cardBrand ?? "Card" : "Cash"}</small></span>
+                      <span><strong>Order #{sale.order.number}</strong><small>{formatDate(sale.payment.createdAt ?? sale.order.createdAt)} · {sale.payment.tender === "card" ? sale.payment.cardBrand ?? "Card" : sale.payment.tender === "vietnam_qr" ? walletLabel(sale.payment.wallet) : "Cash"}</small></span>
                       <b>{formatMoney(sale.order.totalMinor, sale.order.currency)}</b>
                       <Icon name="chevron" />
                     </button>
@@ -693,8 +828,18 @@ export function App() {
                 <span className="status-icon">
                   {paymentState.phase === "captured" ? <Icon name="check" /> : paymentState.phase === "declined" || paymentState.phase === "unknown" ? <Icon name="alert" /> : <span className="spinner" />}
                 </span>
-                <div><strong>{paymentState.phase === "captured" ? "Sale complete" : paymentState.phase === "declined" ? "Payment declined" : paymentState.phase === "unknown" ? "Result needs attention" : "Payment in progress"}</strong><p>{paymentState.message}</p></div>
+                <div><strong>{paymentState.phase === "captured" ? "Sale complete" : paymentState.phase === "declined" ? "Payment declined" : paymentState.phase === "unknown" ? "Result needs attention" : paymentState.phase === "awaiting-qr" ? "Vietnam QR ready" : "Payment in progress"}</strong><p>{paymentState.message}</p></div>
               </div>
+            )}
+
+            {paymentState.phase === "awaiting-qr" && qrAttempt && pendingPayment && (
+              <SandboxQrPanel
+                payment={qrAttempt}
+                amountMinor={pendingPayment.order.totalMinor}
+                currency={pendingPayment.order.currency}
+                busy={paymentBusy}
+                onComplete={(wallet, outcome) => void completeSandboxQr(wallet, outcome)}
+              />
             )}
 
             {paymentState.phase === "idle" && (
@@ -704,6 +849,9 @@ export function App() {
                 </button>
                 <button className="pay-button cash-pay" type="button" onClick={() => void beginPayment("cash")} disabled={!canTender}>
                   <span><Icon name="cash" /></span><div><strong>Exact cash</strong><small>Record full total</small></div><Icon name="chevron" />
+                </button>
+                <button className="pay-button qr-pay" type="button" onClick={() => void beginPayment("vietnam_qr")} disabled={!canTender}>
+                  <span><Icon name="qr" /></span><div><strong>Vietnam QR</strong><small>VCB · MoMo · ZaloPay · ShopeePay</small></div><Icon name="chevron" />
                 </button>
               </div>
             )}
@@ -720,6 +868,7 @@ export function App() {
               <div className="retry-actions">
                 <button type="button" onClick={() => retryDeclined("card")}><Icon name="card" /> Try card again</button>
                 <button type="button" onClick={() => retryDeclined("cash")}><Icon name="cash" /> Take exact cash</button>
+                <button type="button" onClick={() => retryDeclined("vietnam_qr")}><Icon name="qr" /> New Vietnam QR</button>
               </div>
             )}
 
@@ -729,7 +878,7 @@ export function App() {
 
             <div className="payment-footnote">
               <Icon name="lock" />
-              <span>Card data stays in the certified reader.<small>Visa · Mastercard · Amex · JCB · UnionPay</small></span>
+              <span>Payment details stay with the simulated provider.<small>Cards and Vietnam QR are sandbox-only in this build.</small></span>
             </div>
           </div>
         </aside>

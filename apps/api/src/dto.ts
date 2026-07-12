@@ -1,4 +1,5 @@
 import type { Cart, Order, Payment, PaymentAttempt, Product, Refund } from "@pos/domain";
+import type { PaymentPresentation, WalletPaymentSummary } from "@pos/payment-contract";
 
 function amount(value: { readonly minorUnits: bigint }): string {
   return value.minorUnits.toString();
@@ -78,16 +79,23 @@ export function orderDto(order: Order): Record<string, unknown> {
 
 export function paymentAttemptDto(
   attempt: PaymentAttempt,
-  payment?: Payment
+  payment?: Payment,
+  presentation?: PaymentPresentation,
+  wallet?: WalletPaymentSummary
 ): Record<string, unknown> {
   const card = payment?.card;
+  const isVietnamQr = attempt.provider === "simulated-vietnam-qr";
   return {
     id: attempt.id,
     orderId: attempt.orderId,
     provider: attempt.provider,
     providerReference: attempt.providerReference,
     status: attempt.status,
-    tender: payment?.provider === "cash" || attempt.provider === "cash" ? "cash" : "card",
+    tender: payment?.provider === "cash" || attempt.provider === "cash"
+      ? "cash"
+      : isVietnamQr
+        ? "vietnam_qr"
+        : "card",
     amountMinor: amount(attempt.amount),
     currency: attempt.amount.currency,
     terminalId: attempt.terminalId,
@@ -102,6 +110,15 @@ export function paymentAttemptDto(
           entryMethod: card.entryMethod
         }
       : {}),
+    ...(presentation
+      ? {
+          presentation: {
+            ...presentation,
+            expiresAt: presentation.expiresAt.toISOString()
+          }
+        }
+      : {}),
+    ...(wallet ? { wallet } : {}),
     paymentId: payment?.id,
     createdAt: attempt.createdAt.toISOString(),
     updatedAt: attempt.updatedAt.toISOString()
@@ -109,6 +126,8 @@ export function paymentAttemptDto(
 }
 
 export function paymentDto(payment: Payment): Record<string, unknown> {
+  const isVietnamQr = payment.provider === "simulated-vietnam-qr";
+  const wallet = isVietnamQr ? walletFromReference(payment.providerReference) : undefined;
   return {
     id: payment.id,
     orderId: payment.orderId,
@@ -116,12 +135,13 @@ export function paymentDto(payment: Payment): Record<string, unknown> {
     provider: payment.provider,
     providerReference: payment.providerReference,
     status: "CAPTURED",
-    tender: payment.provider === "cash" ? "cash" : "card",
+    tender: payment.provider === "cash" ? "cash" : isVietnamQr ? "vietnam_qr" : "card",
     amountMinor: amount(payment.amount),
     currency: payment.amount.currency,
     cardBrand: payment.card?.brand,
     last4: payment.card?.last4,
     entryMethod: payment.card?.entryMethod,
+    ...(wallet ? { wallet: { wallet } } : {}),
     capturedAt: payment.capturedAt.toISOString()
   };
 }
@@ -143,15 +163,30 @@ export function refundDto(refund: Refund): Record<string, unknown> {
 
 export function receiptDto(order: Order, payment?: Payment): Record<string, unknown> {
   const dto = orderDto(order);
+  const wallet = payment?.provider === "simulated-vietnam-qr"
+    ? walletFromReference(payment.providerReference)
+    : undefined;
   return {
     ...dto,
     orderId: order.id,
     createdAt: payment?.capturedAt.toISOString() ?? new Date().toISOString(),
     issuedAt: payment?.capturedAt.toISOString() ?? new Date().toISOString(),
-    tender: payment?.provider === "cash" ? "cash" : payment ? "card" : undefined,
+    tender: payment?.provider === "cash"
+      ? "cash"
+      : payment?.provider === "simulated-vietnam-qr"
+        ? "vietnam_qr"
+        : payment
+          ? "card"
+          : undefined,
     paymentStatus: payment ? "CAPTURED" : "UNPAID",
     payment: payment ? paymentDto(payment) : undefined,
     cardBrand: payment?.card?.brand,
-    last4: payment?.card?.last4
+    last4: payment?.card?.last4,
+    ...(wallet ? { wallet } : {})
   };
+}
+
+function walletFromReference(reference: string): string | undefined {
+  const match = /^vnqr_pay_(vcb|momo|zalopay|shopeepay_vn)_/.exec(reference);
+  return match?.[1]?.toUpperCase();
 }

@@ -44,6 +44,7 @@ interface StoredRefund {
 }
 
 const CAPABILITIES: PaymentCapabilities = Object.freeze({
+  paymentMethods: Object.freeze(["CARD"] as const),
   cardBrands: Object.freeze(
     ["VISA", "MASTERCARD", "AMEX", "JCB", "UNIONPAY"] as const,
   ),

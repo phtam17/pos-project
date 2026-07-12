@@ -15,6 +15,7 @@ import {
 import {
   PaymentProviderError,
   type PaymentProvider,
+  type PaymentPresentation,
   type PaymentResult,
   type ProviderEvent,
   type ProviderWebhookHeaders,
@@ -42,7 +43,7 @@ export interface CreateProductCommand {
 
 export interface StartPaymentCommand {
   readonly orderId: string;
-  readonly tender: "cash" | "card";
+  readonly tender: "cash" | "card" | "vietnam_qr";
   readonly terminalId?: string;
   readonly idempotencyKey: string;
 }
@@ -50,6 +51,8 @@ export interface StartPaymentCommand {
 export interface StartPaymentResult {
   readonly attempt: PaymentAttempt;
   readonly payment?: Payment;
+  readonly presentation?: PaymentPresentation;
+  readonly wallet?: PaymentResult["wallet"];
   readonly replayed: boolean;
 }
 
@@ -69,6 +72,8 @@ export interface RefundCommandResult {
 interface AppliedPaymentResult {
   readonly attempt: PaymentAttempt;
   readonly payment?: Payment;
+  readonly presentation?: PaymentPresentation;
+  readonly wallet?: PaymentResult["wallet"];
 }
 
 const TERMINAL_STATUSES = new Set<PaymentAttemptStatus>([
@@ -78,11 +83,49 @@ const TERMINAL_STATUSES = new Set<PaymentAttemptStatus>([
 ]);
 
 export class PosService {
+  private readonly paymentProviders: ReadonlyMap<string, PaymentProvider>;
+  private readonly defaultPaymentProvider: PaymentProvider;
+
   constructor(
     private readonly repository: PosRepository,
-    private readonly paymentProvider: PaymentProvider,
+    paymentProviders: PaymentProvider | readonly PaymentProvider[],
     private readonly now: () => Date = () => new Date()
-  ) {}
+  ) {
+    const providers = Array.isArray(paymentProviders) ? paymentProviders : [paymentProviders];
+    if (providers.length === 0 || !providers[0]) {
+      throw new ApplicationError("At least one payment provider is required", "PAYMENT_PROVIDER_REQUIRED", 500);
+    }
+    this.paymentProviders = new Map(providers.map((provider) => [provider.name, provider]));
+    this.defaultPaymentProvider = providers.find((provider) =>
+      provider.capabilities.paymentMethods?.includes("CARD")
+    ) ?? providers[0];
+  }
+
+  listPaymentProviders(): readonly PaymentProvider[] {
+    return [...this.paymentProviders.values()];
+  }
+
+  private providerForTender(tender: "card" | "vietnam_qr"): PaymentProvider {
+    const method = tender === "card" ? "CARD" : "VIETNAM_QR";
+    const provider = [...this.paymentProviders.values()].find((candidate) =>
+      candidate.capabilities.paymentMethods?.includes(method)
+    );
+    if (provider) return provider;
+    if (tender === "card") return this.defaultPaymentProvider;
+    throw new ApplicationError(
+      "Vietnam QR is not configured on this register",
+      "PAYMENT_METHOD_NOT_CONFIGURED",
+      501
+    );
+  }
+
+  private providerForName(name: string): PaymentProvider {
+    const provider = this.paymentProviders.get(name);
+    if (!provider) {
+      throw new ApplicationError(`Payment provider is unavailable: ${name}`, "PAYMENT_PROVIDER_UNAVAILABLE", 503);
+    }
+    return provider;
+  }
 
   listProducts(search?: string, limit = 500, offset = 0): Promise<readonly Product[]> {
     return this.repository.listProducts({
@@ -241,10 +284,15 @@ export class PosService {
       );
     }
 
-    const providerName = command.tender === "cash" ? "cash" : this.paymentProvider.name;
+    const selectedProvider = command.tender === "cash"
+      ? undefined
+      : this.providerForTender(command.tender);
+    const providerName = selectedProvider?.name ?? "cash";
     const terminalId = command.tender === "cash"
       ? "cash-drawer"
-      : command.terminalId?.trim();
+      : command.tender === "vietnam_qr"
+        ? "register-qr-display"
+        : command.terminalId?.trim();
     if (!terminalId) {
       throw new ApplicationError("terminalId is required for card payments", "TERMINAL_REQUIRED");
     }
@@ -312,13 +360,13 @@ export class PosService {
 
     let result: PaymentResult;
     try {
-      result = await this.paymentProvider.startSale({
+      result = await selectedProvider!.startSale({
         attemptId: attempt.id,
         orderId: order.id,
         amount: order.total,
         terminalId,
         idempotencyKey: providerPaymentIdempotencyKey(attempt),
-        metadata: { orderId: order.id }
+        metadata: { orderId: order.id, tender: command.tender }
       });
     } catch (error) {
       const deterministic = error instanceof PaymentProviderError
@@ -366,7 +414,7 @@ export class PosService {
             card: null,
             processedAt: attempt.updatedAt
           }
-        : await this.paymentProvider.getStatus(attempt.id);
+        : await this.providerForName(attempt.provider).getStatus(attempt.id);
       const applied = await this.applyProviderResult(order, attempt, result);
       return { ...applied, replayed: false };
     }
@@ -386,7 +434,8 @@ export class PosService {
     if (attempt.provider === "cash") {
       throw new ApplicationError("Captured cash payments cannot be canceled", "CANCEL_NOT_ALLOWED", 409);
     }
-    if (!this.paymentProvider.capabilities.supportsCancellation) {
+    const provider = this.providerForName(attempt.provider);
+    if (!provider.capabilities.supportsCancellation) {
       throw new ApplicationError(
         "The configured payment provider does not support cancellation",
         "CANCEL_NOT_SUPPORTED",
@@ -401,7 +450,7 @@ export class PosService {
       );
     }
     const order = await this.getOrder(attempt.orderId);
-    const result = await this.paymentProvider.cancel(attempt.id);
+    const result = await provider.cancel(attempt.id);
     return (await this.applyProviderResult(order, attempt, result)).attempt;
   }
 
@@ -435,6 +484,9 @@ export class PosService {
       }
       const refunds = await this.repository.listRefundsForPayment(command.paymentId);
       const payment = await this.getPayment(command.paymentId);
+      const refundProvider = payment.provider === "cash"
+        ? undefined
+        : this.providerForName(payment.provider);
       let refund = refunds.find((candidate) => candidate.id === existing.resourceId);
       if (!refund) {
         if (existing.state !== "IN_PROGRESS") {
@@ -450,7 +502,8 @@ export class PosService {
         }
         if (
           amount.compare(payment.amount) < 0 &&
-          !this.paymentProvider.capabilities.supportsPartialRefunds
+          refundProvider !== undefined &&
+          !refundProvider.capabilities.supportsPartialRefunds
         ) {
           throw new ApplicationError(
             "The configured payment provider does not support partial refunds",
@@ -485,7 +538,7 @@ export class PosService {
         if (payment.provider === "cash") {
           refund.markSucceeded(`cash_refund_${refund.id}`, this.now());
         } else {
-          const result = await this.paymentProvider.refund({
+          const result = await refundProvider!.refund({
             refundId: refund.id,
             paymentId: payment.providerReference,
             amount: refund.amount,
@@ -506,9 +559,13 @@ export class PosService {
     if (amount.minorUnits <= 0n) {
       throw new ApplicationError("Refund amount must be positive", "INVALID_REFUND_AMOUNT");
     }
+    const refundProvider = payment.provider === "cash"
+      ? undefined
+      : this.providerForName(payment.provider);
     if (
       amount.compare(payment.amount) < 0 &&
-      !this.paymentProvider.capabilities.supportsPartialRefunds
+      refundProvider !== undefined &&
+      !refundProvider.capabilities.supportsPartialRefunds
     ) {
       throw new ApplicationError(
         "The configured payment provider does not support partial refunds",
@@ -572,7 +629,7 @@ export class PosService {
     if (payment.provider === "cash") {
       refund.markSucceeded(`cash_refund_${refund.id}`, this.now());
     } else {
-      const result = await this.paymentProvider.refund({
+      const result = await refundProvider!.refund({
         refundId: refund.id,
         paymentId: payment.providerReference,
         amount,
@@ -596,9 +653,10 @@ export class PosService {
 
   async verifyWebhook(
     rawBody: Uint8Array,
-    headers: ProviderWebhookHeaders
+    headers: ProviderWebhookHeaders,
+    providerName = this.defaultPaymentProvider.name
   ): Promise<ProviderEvent> {
-    const event = await this.paymentProvider.verifyWebhook(rawBody, headers);
+    const event = await this.providerForName(providerName).verifyWebhook(rawBody, headers);
     await this.record("ProviderEvent", event.id, "PROVIDER_EVENT_VERIFIED", {
       type: event.type,
       occurredAt: event.occurredAt.toISOString()
@@ -675,14 +733,18 @@ export class PosService {
         409
       );
     }
-    const terminalId = command.tender === "cash" ? "cash-drawer" : command.terminalId?.trim();
+    const terminalId = command.tender === "cash"
+      ? "cash-drawer"
+      : command.tender === "vietnam_qr"
+        ? "register-qr-display"
+        : command.terminalId?.trim();
     if (!terminalId) {
       throw new ApplicationError("terminalId is required for card payments", "TERMINAL_REQUIRED");
     }
     const attempt = PaymentAttempt.create({
       id: record.resourceId,
       orderId: order.id,
-      provider: command.tender === "cash" ? "cash" : this.paymentProvider.name,
+      provider: command.tender === "cash" ? "cash" : this.providerForTender(command.tender).name,
       amount: order.total,
       terminalId,
       idempotencyKey: key,
@@ -748,13 +810,16 @@ export class PosService {
           card: null,
           processedAt: this.now()
         }
-      : await this.paymentProvider.startSale({
+      : await this.providerForName(attempt.provider).startSale({
           attemptId: attempt.id,
           orderId: attempt.orderId,
           amount: attempt.amount,
           terminalId: attempt.terminalId,
           idempotencyKey: providerPaymentIdempotencyKey(attempt),
-          metadata: { orderId: attempt.orderId }
+          metadata: {
+            orderId: attempt.orderId,
+            tender: attempt.provider.includes("vietnam-qr") ? "vietnam_qr" : "card"
+          }
         });
     const applied = await this.applyProviderResult(order, attempt, result);
     await this.completeIdempotency(scope, key, requestHash, attempt.id);
@@ -777,14 +842,23 @@ export class PosService {
       );
       if (existing) {
         await this.ensureOrderPaid(order, existing);
-        return { attempt: persistedAttempt, payment: existing };
+        return {
+          attempt: persistedAttempt,
+          payment: existing,
+          ...(result.presentation ? { presentation: result.presentation } : {}),
+          ...(result.wallet ? { wallet: result.wallet } : {})
+        };
       }
       // A stale non-capture response may lose a CAS race to the capture path.
       // Let the winning request create the Payment; a later read repairs any
       // crash between the captured attempt and payment insert.
       if (result.status !== "CAPTURED") return { attempt: persistedAttempt };
       const payment = await this.capturePayment(order, persistedAttempt, result);
-      return { attempt: persistedAttempt, payment };
+      return {
+        attempt: persistedAttempt,
+        payment,
+        ...(result.wallet ? { wallet: result.wallet } : {})
+      };
     }
     if (
       (persistedAttempt.status === "DECLINED" || persistedAttempt.status === "CANCELED") &&
@@ -800,7 +874,11 @@ export class PosService {
         failureCode: persistedAttempt.failureCode
       });
     }
-    return { attempt: persistedAttempt };
+    return {
+      attempt: persistedAttempt,
+      ...(result.presentation ? { presentation: result.presentation } : {}),
+      ...(result.wallet ? { wallet: result.wallet } : {})
+    };
   }
 
   private async capturePayment(
@@ -886,19 +964,23 @@ export class PosService {
   }
 
   private async queryOrResumeProviderAttempt(attempt: PaymentAttempt): Promise<PaymentResult> {
+    const provider = this.providerForName(attempt.provider);
     try {
-      return await this.paymentProvider.getStatus(attempt.id);
+      return await provider.getStatus(attempt.id);
     } catch (error) {
       if (!(error instanceof PaymentProviderError) || error.code !== "ATTEMPT_NOT_FOUND") {
         throw error;
       }
-      return this.paymentProvider.startSale({
+      return provider.startSale({
         attemptId: attempt.id,
         orderId: attempt.orderId,
         amount: attempt.amount,
         terminalId: attempt.terminalId,
         idempotencyKey: providerPaymentIdempotencyKey(attempt),
-        metadata: { orderId: attempt.orderId }
+        metadata: {
+          orderId: attempt.orderId,
+          tender: attempt.provider.includes("vietnam-qr") ? "vietnam_qr" : "card"
+        }
       });
     }
   }

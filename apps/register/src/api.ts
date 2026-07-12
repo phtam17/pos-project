@@ -1,5 +1,15 @@
 export type AmountMinor = string;
-export type Tender = "cash" | "card";
+export type Tender = "cash" | "card" | "vietnam_qr";
+export type VietnamQrWallet = "VCB" | "MOMO" | "ZALOPAY" | "SHOPEEPAY_VN";
+export type SandboxQrOutcome = "APPROVED" | "DECLINED" | "EXPIRED";
+
+export interface QrPresentationDto {
+  type: "QR_CODE";
+  payload: string;
+  expiresAt: string;
+  supportedWallets: VietnamQrWallet[];
+  sandbox: boolean;
+}
 
 export interface ProductDto {
   id: string;
@@ -53,6 +63,12 @@ export interface PaymentAttemptDto {
   cardBrand?: string;
   last4?: string;
   failureMessage?: string;
+  provider?: string;
+  presentation?: QrPresentationDto;
+  wallet?: VietnamQrWallet;
+  payerAmountMinor?: AmountMinor;
+  payerCurrency?: string;
+  exchangeRate?: string;
   createdAt?: string;
 }
 
@@ -69,6 +85,7 @@ export interface ReceiptDto {
   paymentStatus?: string;
   cardBrand?: string;
   last4?: string;
+  wallet?: VietnamQrWallet;
 }
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") ?? "";
@@ -210,16 +227,48 @@ function normalizePayment(value: unknown): PaymentAttemptDto {
   const optionalFailure = optionalText(source.failureMessage ?? source.message);
   const optionalCreatedAt = optionalText(source.createdAt);
   const tenderValue = text(source.tender, "card").toLowerCase();
+  const presentation = record(source.presentation);
+  const walletDetails = record(source.wallet);
+  const walletValue = optionalText(walletDetails.wallet ?? source.wallet)?.toUpperCase();
+  const supportedWallets = Array.isArray(presentation.supportedWallets)
+    ? presentation.supportedWallets
+        .map((wallet) => text(wallet).toUpperCase())
+        .filter(isVietnamQrWallet)
+    : [];
+  const presentationPayload = optionalText(presentation.payload);
+  const presentationExpiresAt = optionalText(presentation.expiresAt);
 
   return {
     id: text(source.id),
     orderId: text(source.orderId),
     status: text(source.status, "UNKNOWN").toUpperCase(),
-    tender: tenderValue === "cash" ? "cash" : "card",
+    tender: tenderValue === "cash" ? "cash" : tenderValue === "vietnam_qr" ? "vietnam_qr" : "card",
     amountMinor: amount(source.amountMinor),
+    ...(optionalText(source.provider) ? { provider: text(source.provider) } : {}),
     ...(optionalBrand ? { cardBrand: optionalBrand } : {}),
     ...(optionalLast4 ? { last4: optionalLast4 } : {}),
     ...(optionalFailure ? { failureMessage: optionalFailure } : {}),
+    ...(presentationPayload && presentationExpiresAt
+      ? {
+          presentation: {
+            type: "QR_CODE",
+            payload: presentationPayload,
+            expiresAt: presentationExpiresAt,
+            supportedWallets,
+            sandbox: presentation.sandbox === true
+          }
+        }
+      : {}),
+    ...(walletValue && isVietnamQrWallet(walletValue) ? { wallet: walletValue } : {}),
+    ...(optionalText(walletDetails.payerAmountMinor)
+      ? { payerAmountMinor: amount(walletDetails.payerAmountMinor) }
+      : {}),
+    ...(optionalText(walletDetails.payerCurrency)
+      ? { payerCurrency: text(walletDetails.payerCurrency).toUpperCase() }
+      : {}),
+    ...(optionalText(walletDetails.exchangeRate)
+      ? { exchangeRate: text(walletDetails.exchangeRate) }
+      : {}),
     ...(optionalCreatedAt ? { createdAt: optionalCreatedAt } : {})
   };
 }
@@ -232,6 +281,7 @@ function normalizeReceipt(value: unknown): ReceiptDto {
   const optionalPaymentStatus = optionalText(source.paymentStatus ?? payment.status);
   const optionalBrand = optionalText(source.cardBrand ?? payment.cardBrand);
   const optionalLast4 = optionalText(source.last4 ?? payment.last4);
+  const optionalWallet = optionalText(source.wallet ?? record(payment.wallet).wallet)?.toUpperCase();
 
   return {
     orderId: text(source.orderId ?? source.id),
@@ -242,10 +292,13 @@ function normalizeReceipt(value: unknown): ReceiptDto {
     subtotalMinor: order.subtotalMinor,
     taxMinor: order.taxMinor,
     totalMinor: order.totalMinor,
-    ...(optionalTender === "cash" || optionalTender === "card" ? { tender: optionalTender } : {}),
+    ...(optionalTender === "cash" || optionalTender === "card" || optionalTender === "vietnam_qr"
+      ? { tender: optionalTender }
+      : {}),
     ...(optionalPaymentStatus ? { paymentStatus: optionalPaymentStatus } : {}),
     ...(optionalBrand ? { cardBrand: optionalBrand } : {}),
-    ...(optionalLast4 ? { last4: optionalLast4 } : {})
+    ...(optionalLast4 ? { last4: optionalLast4 } : {}),
+    ...(optionalWallet && isVietnamQrWallet(optionalWallet) ? { wallet: optionalWallet } : {})
   };
 }
 
@@ -329,7 +382,22 @@ export const api = {
     }));
   },
 
+  async completeSandboxVietnamQr(
+    attemptId: string,
+    wallet: VietnamQrWallet,
+    outcome: SandboxQrOutcome
+  ): Promise<PaymentAttemptDto> {
+    return normalizePayment(await request(`/v1/sandbox/vietnam-qr/${encodeURIComponent(attemptId)}/complete`, {
+      method: "POST",
+      body: JSON.stringify({ wallet, outcome })
+    }));
+  },
+
   async getReceipt(orderId: string): Promise<ReceiptDto> {
     return normalizeReceipt(await request(`/v1/orders/${encodeURIComponent(orderId)}/receipt`));
   }
 };
+
+function isVietnamQrWallet(value: string): value is VietnamQrWallet {
+  return value === "VCB" || value === "MOMO" || value === "ZALOPAY" || value === "SHOPEEPAY_VN";
+}

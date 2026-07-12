@@ -19,7 +19,7 @@ export const addCartLineSchema = z.object({
 }).strict();
 
 export const paymentAttemptSchema = z.object({
-  tender: z.enum(["cash", "card"]),
+  tender: z.enum(["cash", "card", "vietnam_qr"]),
   terminalId: z.string().trim().min(1).max(128).optional()
 }).strict().superRefine((value, context) => {
   if (value.tender === "card" && !value.terminalId) {
@@ -30,6 +30,11 @@ export const paymentAttemptSchema = z.object({
     });
   }
 });
+
+export const sandboxVietnamQrCompletionSchema = z.object({
+  wallet: z.enum(["VCB", "MOMO", "ZALOPAY", "SHOPEEPAY_VN"]),
+  outcome: z.enum(["APPROVED", "DECLINED", "EXPIRED"])
+}).strict();
 
 export const refundSchema = z.object({
   amountMinor: z.string().regex(/^\d+$/),

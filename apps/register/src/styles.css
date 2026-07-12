@@ -1025,6 +1025,172 @@ h2 {
   background: #ebf5f0;
 }
 
+.qr-pay {
+  color: #233d34;
+  background: linear-gradient(135deg, #f3fbf7, #eef7ff);
+  border: 1px solid #bcdacf;
+}
+
+.qr-pay:hover:not(:disabled) {
+  background: linear-gradient(135deg, #e8f8f0, #e5f2ff);
+  border-color: #85b7a4;
+}
+
+.qr-pay > span {
+  color: #08785a;
+  background: #dff3ea;
+}
+
+.sandbox-qr {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 12px;
+  background: #fff;
+  border: 1px solid #cfe1d9;
+  border-radius: 12px;
+  box-shadow: 0 10px 26px rgb(25 70 52 / 8%);
+}
+
+.sandbox-qr-heading,
+.sandbox-qr-body,
+.sandbox-qr-controls {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.sandbox-qr-heading > div {
+  display: grid;
+  gap: 4px;
+}
+
+.sandbox-qr-heading h3 {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+.sandbox-qr-heading > strong {
+  color: var(--green-dark);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.sandbox-badge {
+  width: fit-content;
+  padding: 3px 6px;
+  color: #80500b;
+  background: #fff3cf;
+  border-radius: 999px;
+  font-size: 7px;
+  font-weight: 850;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.sandbox-qr-body {
+  align-items: center;
+}
+
+.qr-frame {
+  flex: 0 0 142px;
+  display: grid;
+  place-items: center;
+  gap: 4px;
+  padding: 7px;
+  background: #fff;
+  border: 1px solid #dfe7e3;
+  border-radius: 10px;
+}
+
+.qr-frame img {
+  display: block;
+  width: 128px;
+  height: 128px;
+}
+
+.qr-frame small {
+  color: #697871;
+  font-size: 7px;
+  font-variant-numeric: tabular-nums;
+}
+
+.qr-instructions {
+  min-width: 0;
+}
+
+.qr-instructions p,
+.qr-instructions > span,
+.sandbox-warning {
+  margin: 0;
+  color: #596a62;
+  font-size: 8px;
+  line-height: 1.4;
+}
+
+.qr-instructions > span {
+  display: block;
+  margin-top: 7px;
+}
+
+.wallet-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+  margin-top: 6px;
+}
+
+.wallet-grid button {
+  display: grid;
+  gap: 1px;
+  min-height: 35px;
+  padding: 5px 6px;
+  text-align: left;
+  color: #27483b;
+  background: #f0f8f4;
+  border: 1px solid #d5e8df;
+  border-radius: 7px;
+}
+
+.wallet-grid button:hover:not(:disabled) {
+  background: #e5f4ec;
+  border-color: #a8d1bf;
+}
+
+.wallet-grid b { font-size: 8px; }
+.wallet-grid small { font-size: 6px; opacity: .72; }
+
+.sandbox-qr-controls {
+  justify-content: flex-end;
+}
+
+.sandbox-qr-controls button {
+  padding: 5px 8px;
+  color: #6c4c21;
+  background: #fffaf0;
+  border: 1px solid #ead9ba;
+  border-radius: 6px;
+  font-size: 7px;
+  font-weight: 750;
+}
+
+.sandbox-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  padding-top: 8px;
+  color: #7a5725;
+  border-top: 1px solid #ece7dc;
+}
+
+.sandbox-warning svg {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+}
+
 .payment-footnote {
   display: flex;
   align-items: flex-start;

@@ -120,6 +120,59 @@ describe("POS API vertical slice", () => {
     expect(receipt.cardBrand).toBe("VISA");
   });
 
+  it("runs a complete Vietnam QR sandbox checkout", async () => {
+    const instance = await app();
+    const productId = (await instance.inject({ method: "GET", url: "/v1/products" }))
+      .json<{ products: Array<{ id: string }> }>().products[0]!.id;
+    const cartId = (await instance.inject({ method: "POST", url: "/v1/carts", payload: {} }))
+      .json<{ id: string }>().id;
+    await instance.inject({
+      method: "POST",
+      url: `/v1/carts/${cartId}/lines`,
+      payload: { productId, quantity: 1 }
+    });
+    const orderId = (await instance.inject({
+      method: "POST",
+      url: `/v1/carts/${cartId}/checkout`,
+      headers: { "idempotency-key": "vietnam-qr-checkout" }
+    })).json<{ id: string }>().id;
+
+    const started = await instance.inject({
+      method: "POST",
+      url: `/v1/orders/${orderId}/payment-attempts`,
+      headers: { "idempotency-key": "vietnam-qr-payment" },
+      payload: { tender: "vietnam_qr" }
+    });
+    expect(started.statusCode).toBe(201);
+    const attempt = started.json<{
+      id: string;
+      status: string;
+      tender: string;
+      presentation: { sandbox: boolean; supportedWallets: string[] };
+    }>();
+    expect(attempt).toMatchObject({
+      status: "PROCESSING",
+      tender: "vietnam_qr",
+      presentation: {
+        sandbox: true,
+        supportedWallets: ["VCB", "MOMO", "ZALOPAY", "SHOPEEPAY_VN"]
+      }
+    });
+
+    const completed = await instance.inject({
+      method: "POST",
+      url: `/v1/sandbox/vietnam-qr/${attempt.id}/complete`,
+      payload: { wallet: "VCB", outcome: "APPROVED" }
+    });
+    expect(completed.statusCode).toBe(200);
+    expect(completed.json<{ status: string; tender: string; wallet: { wallet: string } }>())
+      .toMatchObject({ status: "CAPTURED", tender: "vietnam_qr", wallet: { wallet: "VCB" } });
+
+    const receipt = await instance.inject({ method: "GET", url: `/v1/orders/${orderId}/receipt` });
+    expect(receipt.json<{ paymentStatus: string; tender: string; wallet: string }>())
+      .toMatchObject({ paymentStatus: "CAPTURED", tender: "vietnam_qr", wallet: "VCB" });
+  });
+
   it("resolves an UNKNOWN attempt by replaying the original idempotent request", async () => {
     const instance = await app();
     const productResponse = await instance.inject({
