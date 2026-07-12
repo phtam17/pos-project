@@ -730,12 +730,20 @@ h2 {
   flex-direction: column;
   align-self: start;
   max-height: calc(100dvh - 116px);
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
 }
 
 .cart-header {
+  position: sticky;
+  z-index: 2;
+  top: 0;
   flex: 0 0 auto;
   padding: 21px 22px 17px;
+  background: var(--panel);
   border-bottom: 1px solid #e4e8e6;
 }
 
@@ -753,10 +761,9 @@ h2 {
 }
 
 .cart-body {
-  flex: 1 1 auto;
+  flex: 0 0 auto;
   min-height: 160px;
-  overflow-y: auto;
-  scrollbar-width: thin;
+  overflow: visible;
 }
 
 .empty-cart {
@@ -1573,8 +1580,9 @@ h2 {
   .topbar { grid-template-columns: 1fr auto; }
   .main-nav { display: none; }
   .register-layout { grid-template-columns: minmax(0, 1fr); }
-  .cart-panel { position: static; grid-row: 1; max-height: none; }
-  .cart-body { max-height: 330px; }
+  .cart-panel { position: static; grid-row: 1; max-height: none; overflow: visible; }
+  .cart-header { position: static; }
+  .cart-body { max-height: 330px; overflow-y: auto; }
   .product-grid { grid-template-columns: repeat(4, minmax(135px, 1fr)); }
   .catalog-panel { grid-row: 2; }
 }
