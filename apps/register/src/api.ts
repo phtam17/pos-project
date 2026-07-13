@@ -72,6 +72,26 @@ export interface PaymentAttemptDto {
   createdAt?: string;
 }
 
+export interface RefundDto {
+  id: string;
+  paymentId: string;
+  provider: string;
+  status: string;
+  amountMinor: AmountMinor;
+  currency: string;
+  failureCode?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SaleDetailDto {
+  order: OrderDto;
+  payments: PaymentAttemptDto[];
+  refunds: RefundDto[];
+  refundedMinor: AmountMinor;
+  remainingMinor: AmountMinor;
+}
+
 export interface ReceiptDto {
   orderId: string;
   orderNumber: string;
@@ -86,6 +106,10 @@ export interface ReceiptDto {
   cardBrand?: string;
   last4?: string;
   wallet?: VietnamQrWallet;
+  refundStatus: "NONE" | "PENDING" | "PARTIAL" | "FULL";
+  refundedMinor: AmountMinor;
+  remainingMinor: AmountMinor;
+  refunds: RefundDto[];
 }
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") ?? "";
@@ -205,7 +229,7 @@ function normalizeCart(value: unknown): CartDto {
 function normalizeOrder(value: unknown): OrderDto {
   const source = record(envelope(value, ["order"]));
   const cartShape = normalizeCart(source);
-  const optionalCreatedAt = optionalText(source.createdAt);
+  const optionalCreatedAt = optionalText(source.createdAt ?? source.capturedAt);
 
   return {
     id: text(source.id),
@@ -217,6 +241,39 @@ function normalizeOrder(value: unknown): OrderDto {
     taxMinor: cartShape.taxMinor,
     totalMinor: cartShape.totalMinor,
     ...(optionalCreatedAt ? { createdAt: optionalCreatedAt } : {})
+  };
+}
+
+function normalizeRefund(value: unknown): RefundDto {
+  const source = record(value);
+  return {
+    id: text(source.id),
+    paymentId: text(source.paymentId),
+    provider: text(source.provider),
+    status: text(source.status, "UNKNOWN").toUpperCase(),
+    amountMinor: amount(source.amountMinor),
+    currency: text(source.currency, "USD").toUpperCase(),
+    ...(optionalText(source.failureCode) ? { failureCode: text(source.failureCode) } : {}),
+    createdAt: text(source.createdAt, new Date().toISOString()),
+    updatedAt: text(source.updatedAt ?? source.createdAt, new Date().toISOString())
+  };
+}
+
+function normalizeSaleDetail(value: unknown): SaleDetailDto {
+  const source = record(value);
+  const order = normalizeOrder(source.order);
+  const payments = Array.isArray(source.payments) ? source.payments.map(normalizePayment) : [];
+  const refunds = Array.isArray(source.refunds) ? source.refunds.map(normalizeRefund) : [];
+  const refunded = refunds
+    .filter((refund) => refund.status === "SUCCEEDED")
+    .reduce((sum, refund) => sum + BigInt(refund.amountMinor), 0n);
+  const total = BigInt(order.totalMinor);
+  return {
+    order,
+    payments,
+    refunds,
+    refundedMinor: refunded.toString(),
+    remainingMinor: (total > refunded ? total - refunded : 0n).toString()
   };
 }
 
@@ -282,6 +339,11 @@ function normalizeReceipt(value: unknown): ReceiptDto {
   const optionalBrand = optionalText(source.cardBrand ?? payment.cardBrand);
   const optionalLast4 = optionalText(source.last4 ?? payment.last4);
   const optionalWallet = optionalText(source.wallet ?? record(payment.wallet).wallet)?.toUpperCase();
+  const refundStatusValue = text(source.refundStatus, "NONE").toUpperCase();
+  const refundStatus = refundStatusValue === "PENDING" || refundStatusValue === "PARTIAL" || refundStatusValue === "FULL"
+    ? refundStatusValue
+    : "NONE";
+  const refunds = Array.isArray(source.refunds) ? source.refunds.map(normalizeRefund) : [];
 
   return {
     orderId: text(source.orderId ?? source.id),
@@ -298,7 +360,11 @@ function normalizeReceipt(value: unknown): ReceiptDto {
     ...(optionalPaymentStatus ? { paymentStatus: optionalPaymentStatus } : {}),
     ...(optionalBrand ? { cardBrand: optionalBrand } : {}),
     ...(optionalLast4 ? { last4: optionalLast4 } : {}),
-    ...(optionalWallet && isVietnamQrWallet(optionalWallet) ? { wallet: optionalWallet } : {})
+    ...(optionalWallet && isVietnamQrWallet(optionalWallet) ? { wallet: optionalWallet } : {}),
+    refundStatus,
+    refundedMinor: amount(source.refundedMinor),
+    remainingMinor: amount(source.remainingMinor, order.totalMinor),
+    refunds
   };
 }
 
@@ -368,6 +434,28 @@ export const api = {
     }));
   },
 
+  async listOrders(options: {
+    search?: string;
+    status?: string;
+    limit?: number;
+    offset?: number;
+  } = {}): Promise<OrderDto[]> {
+    const query = new URLSearchParams();
+    if (options.search?.trim()) query.set("search", options.search.trim());
+    if (options.status) query.set("status", options.status);
+    query.set("limit", String(options.limit ?? 50));
+    query.set("offset", String(options.offset ?? 0));
+    const body = await request(`/v1/orders?${query.toString()}`);
+    const orders = envelope(body, ["orders"]);
+    return Array.isArray(orders) ? orders.map(normalizeOrder) : [];
+  },
+
+  async getSaleDetail(orderId: string): Promise<SaleDetailDto> {
+    return normalizeSaleDetail(
+      await request(`/v1/orders/${encodeURIComponent(orderId)}/sale`)
+    );
+  },
+
   async createPaymentAttempt(
     orderId: string,
     tender: Tender,
@@ -395,6 +483,25 @@ export const api = {
 
   async getReceipt(orderId: string): Promise<ReceiptDto> {
     return normalizeReceipt(await request(`/v1/orders/${encodeURIComponent(orderId)}/receipt`));
+  },
+
+  async refundPayment(
+    paymentId: string,
+    amountMinor: AmountMinor,
+    reason: string,
+    managerId: string,
+    managerKey: string,
+    idempotencyKey: string
+  ): Promise<RefundDto> {
+    return normalizeRefund(await request(`/v1/payments/${encodeURIComponent(paymentId)}/refunds`, {
+      method: "POST",
+      headers: {
+        "Idempotency-Key": idempotencyKey,
+        "X-Manager-Id": managerId,
+        "X-Manager-Key": managerKey
+      },
+      body: JSON.stringify({ amountMinor, reason })
+    }));
   }
 };
 

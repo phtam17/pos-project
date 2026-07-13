@@ -10,6 +10,7 @@ import {
   PaymentAttempt,
   Product,
   Refund,
+  type OrderStatus,
   type PaymentAttemptStatus
 } from "@pos/domain";
 import {
@@ -250,6 +251,20 @@ export class PosService {
     return (await this.repository.getOrder(id)) ?? Promise.reject(notFound("Order", id));
   }
 
+  listOrders(
+    search?: string,
+    status?: OrderStatus,
+    limit = 100,
+    offset = 0
+  ): Promise<readonly Order[]> {
+    return this.repository.listOrders({
+      limit,
+      offset,
+      ...(search ? { search } : {}),
+      ...(status ? { status } : {})
+    });
+  }
+
   async startPayment(command: StartPaymentCommand): Promise<StartPaymentResult> {
     if (command.idempotencyKey.trim().length < 8) {
       throw new ApplicationError(
@@ -460,6 +475,10 @@ export class PosService {
 
   async listPaymentsForOrder(orderId: string): Promise<readonly Payment[]> {
     return this.repository.listPaymentsForOrder(orderId);
+  }
+
+  async listRefundsForPayment(paymentId: string): Promise<readonly Refund[]> {
+    return this.repository.listRefundsForPayment(paymentId);
   }
 
   async refundPayment(command: RefundCommand): Promise<RefundCommandResult> {

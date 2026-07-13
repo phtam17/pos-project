@@ -26,6 +26,7 @@ import type {
   AuditQuery,
   IdempotencyClaim,
   IdempotencyRecord,
+  OrderQuery,
   PosRepository,
   ProductQuery,
   ReconciliationQuery,
@@ -294,6 +295,40 @@ export class PostgresPosRepository implements PosRepository {
     } catch (error) {
       translateWriteError(error, "Order", order.id);
     }
+  }
+
+  async listOrders(query: OrderQuery = {}): Promise<readonly Order[]> {
+    const values: unknown[] = [];
+    const conditions: string[] = [];
+    if (query.status !== undefined) {
+      values.push(query.status);
+      conditions.push(`orders.status = $${values.length}`);
+    }
+    if (query.search?.trim()) {
+      values.push(`%${query.search.trim()}%`);
+      const search = `$${values.length}`;
+      conditions.push(`(
+        orders.id::text ILIKE ${search}
+        OR orders.order_number ILIKE ${search}
+        OR EXISTS (
+          SELECT 1 FROM order_lines
+           WHERE order_lines.order_id = orders.id
+             AND (order_lines.name ILIKE ${search} OR order_lines.sku ILIKE ${search})
+        )
+      )`);
+    }
+    values.push(Math.max(0, query.limit ?? 100));
+    const limit = `$${values.length}`;
+    values.push(Math.max(0, query.offset ?? 0));
+    const offset = `$${values.length}`;
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    const result = await this.pool.query<SnapshotRow>(
+      `SELECT orders.snapshot FROM orders ${where}
+       ORDER BY orders.created_at DESC, orders.id DESC
+       LIMIT ${limit} OFFSET ${offset}`,
+      values
+    );
+    return result.rows.map((row) => decodeAggregate(row.snapshot, Order));
   }
 
   async getOrder(id: string): Promise<Order | undefined> {

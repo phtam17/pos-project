@@ -7,7 +7,8 @@ import type {
   PaymentAttempt,
   Product,
   Refund,
-  SettlementBatch
+  SettlementBatch,
+  OrderStatus
 } from "@pos/domain";
 import { Money } from "@pos/domain";
 
@@ -34,6 +35,13 @@ export interface IdempotencyClaim {
 export interface ProductQuery {
   readonly activeOnly?: boolean;
   readonly search?: string;
+  readonly limit?: number;
+  readonly offset?: number;
+}
+
+export interface OrderQuery {
+  readonly search?: string;
+  readonly status?: OrderStatus;
   readonly limit?: number;
   readonly offset?: number;
 }
@@ -79,6 +87,7 @@ export interface PosRepository {
   saveCart(cart: Cart, expectedVersion?: number): Promise<Cart>;
 
   createOrder(order: Order): Promise<Order>;
+  listOrders(query?: OrderQuery): Promise<readonly Order[]>;
   getOrder(id: string): Promise<Order | undefined>;
   findOrderByCartId(cartId: string): Promise<Order | undefined>;
   saveOrder(order: Order, expectedVersion?: number): Promise<Order>;

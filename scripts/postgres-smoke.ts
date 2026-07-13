@@ -60,6 +60,17 @@ try {
   assert.equal(paymentResponse.statusCode, 201);
   assert.equal(paymentResponse.json<{ status: string }>().status, "CAPTURED");
 
+  const orderHistoryResponse = await app.inject({
+    method: "GET",
+    url: `/v1/orders?status=PAID&search=${encodeURIComponent(orderId.slice(0, 8))}`
+  });
+  assert.equal(orderHistoryResponse.statusCode, 200, orderHistoryResponse.body);
+  assert.ok(
+    orderHistoryResponse.json<{ orders: Array<{ id: string }> }>().orders
+      .some((order) => order.id === orderId),
+    "captured order should be searchable in PostgreSQL history"
+  );
+
   const receiptResponse = await app.inject({
     method: "GET",
     url: `/v1/orders/${orderId}/receipt`
@@ -107,6 +118,25 @@ try {
     payload: { amountMinor: cardPayment.amountMinor, reason: "PostgreSQL smoke refund" }
   });
   assert.equal(refundResponse.statusCode, 201, refundResponse.body);
+  const refundedSaleResponse = await app.inject({
+    method: "GET",
+    url: `/v1/orders/${secondOrderId}/sale`
+  });
+  assert.equal(refundedSaleResponse.statusCode, 200, refundedSaleResponse.body);
+  assert.equal(
+    refundedSaleResponse.json<{ order: { status: string }; refunds: unknown[] }>().order.status,
+    "REFUNDED"
+  );
+  assert.equal(
+    refundedSaleResponse.json<{ order: { status: string }; refunds: unknown[] }>().refunds.length,
+    1
+  );
+  const refundedReceiptResponse = await app.inject({
+    method: "GET",
+    url: `/v1/orders/${secondOrderId}/receipt`
+  });
+  assert.equal(refundedReceiptResponse.statusCode, 200, refundedReceiptResponse.body);
+  assert.equal(refundedReceiptResponse.json<{ refundStatus: string }>().refundStatus, "FULL");
 
   const worker = await runWorkerOnce({
     repository,

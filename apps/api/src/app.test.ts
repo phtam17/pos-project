@@ -971,4 +971,76 @@ describe("POS API vertical slice", () => {
     const order = await instance.inject({ method: "GET", url: `/v1/orders/${orderId}` });
     expect(order.json<{ status: string }>().status).toBe("REFUNDED");
   });
+
+  it("lists a persisted sale and records partial and full refunds in its history", async () => {
+    const instance = await buildApp({
+      config: { ...config, managerApiKey: "manager-test-key" },
+      logger: false
+    });
+    openApps.push(instance);
+    const product = (await instance.inject({
+      method: "POST",
+      url: "/v1/products",
+      payload: {
+        sku: "ORDER-HISTORY-ITEM",
+        name: "Order history test item",
+        priceMinor: "1000",
+        currency: "USD",
+        taxRateBps: 0
+      }
+    })).json<{ id: string }>();
+    const cartId = (await instance.inject({ method: "POST", url: "/v1/carts", payload: {} }))
+      .json<{ id: string }>().id;
+    await instance.inject({
+      method: "POST",
+      url: `/v1/carts/${cartId}/lines`,
+      payload: { productId: product.id, quantity: 1 }
+    });
+    const order = (await instance.inject({
+      method: "POST",
+      url: `/v1/carts/${cartId}/checkout`,
+      headers: { "idempotency-key": "history-checkout-key" }
+    })).json<{ id: string; number: string }>();
+    const payment = (await instance.inject({
+      method: "POST",
+      url: `/v1/orders/${order.id}/payment-attempts`,
+      headers: { "idempotency-key": "history-payment-key" },
+      payload: { tender: "card", terminalId: "simulated-reader" }
+    })).json<{ paymentId: string; amountMinor: string }>();
+
+    const listed = await instance.inject({
+      method: "GET",
+      url: "/v1/orders?status=PAID&search=history%20test&limit=10"
+    });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json<{ orders: Array<{ id: string }> }>().orders.map((item) => item.id))
+      .toContain(order.id);
+
+    const refund = (key: string, amountMinor: string) => instance.inject({
+      method: "POST" as const,
+      url: `/v1/payments/${payment.paymentId}/refunds`,
+      headers: {
+        "idempotency-key": key,
+        "x-manager-id": "manager-1",
+        "x-manager-key": "manager-test-key"
+      },
+      payload: { amountMinor, reason: "Lifecycle test return" }
+    });
+
+    expect((await refund("history-partial-refund", "250")).statusCode).toBe(201);
+    const partialSale = await instance.inject({ method: "GET", url: `/v1/orders/${order.id}/sale` });
+    expect(partialSale.json<{ order: { status: string }; refunds: Array<{ amountMinor: string }> }>())
+      .toMatchObject({ order: { status: "PAID" }, refunds: [{ amountMinor: "250" }] });
+    const partialReceipt = await instance.inject({ method: "GET", url: `/v1/orders/${order.id}/receipt` });
+    expect(partialReceipt.json<{ refundStatus: string; refundedMinor: string; remainingMinor: string }>())
+      .toMatchObject({ refundStatus: "PARTIAL", refundedMinor: "250", remainingMinor: "750" });
+
+    expect((await refund("history-full-refund", "750")).statusCode).toBe(201);
+    const fullReceipt = await instance.inject({ method: "GET", url: `/v1/orders/${order.id}/receipt` });
+    expect(fullReceipt.json<{ status: string; refundStatus: string; refundedMinor: string; remainingMinor: string }>())
+      .toMatchObject({ status: "REFUNDED", refundStatus: "FULL", refundedMinor: "1000", remainingMinor: "0" });
+    const refundedOrders = await instance.inject({ method: "GET", url: "/v1/orders?status=REFUNDED" });
+    expect(refundedOrders.json<{ orders: Array<{ id: string }> }>().orders.map((item) => item.id))
+      .toContain(order.id);
+  });
 });

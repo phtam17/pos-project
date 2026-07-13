@@ -60,7 +60,27 @@ simulator uses an illustrative VND rate of 25,500 VND/USD and a 2.5% settlement 
 so FX, fee, refund, and reconciliation behavior can be developed before an acquirer
 provides real sandbox credentials. Neither value is a commercial quote.
 
-The refund endpoint is disabled unless `MANAGER_API_KEY` is configured. The key is a development safeguard, not a substitute for staff authentication and RBAC.
+## Test order history and refunds
+
+The **Orders** tab is backed by the API repository, not browser session state. It can
+search by order number, item name, or SKU; filter by status; open payment details;
+reprint a refund-aware receipt; and issue full or partial sandbox refunds.
+
+1. Set a development key in `.env`, for example
+   `MANAGER_API_KEY=replace-me-to-enable-refunds`, and restart `npm run dev` if it
+   was already running.
+2. Complete a card, cash, or Vietnam QR sandbox sale.
+3. Open **Orders**, select the sale, and choose **Refund**.
+4. Choose **Full remaining** or enter a smaller amount. Enter any non-empty manager
+   ID and use the exact `MANAGER_API_KEY` value as the manager key.
+5. Confirm the refund. The order detail and receipt show the refund history, the
+   refunded amount, and the remaining net payment. A fully refunded order moves to
+   the **Refunded** status filter.
+
+Memory mode keeps order history only until the API process restarts. PostgreSQL mode
+persists the same history across restarts; use the PostgreSQL setup below when you
+want to demonstrate that behavior. The manager key is only a development safeguard,
+not a substitute for staff authentication and role-based access control.
 
 ## Run with PostgreSQL
 

@@ -161,8 +161,27 @@ export function refundDto(refund: Refund): Record<string, unknown> {
   };
 }
 
-export function receiptDto(order: Order, payment?: Payment): Record<string, unknown> {
+export function receiptDto(
+  order: Order,
+  payment?: Payment,
+  refunds: readonly Refund[] = []
+): Record<string, unknown> {
   const dto = orderDto(order);
+  const succeededRefunds = refunds.filter((refund) => refund.status === "SUCCEEDED");
+  const refundedMinor = succeededRefunds.reduce(
+    (sum, refund) => sum + refund.amount.minorUnits,
+    0n
+  );
+  const remainingMinor = order.total.minorUnits > refundedMinor
+    ? order.total.minorUnits - refundedMinor
+    : 0n;
+  const refundStatus = refunds.some((refund) => refund.status === "PENDING")
+    ? "PENDING"
+    : refundedMinor === 0n
+      ? "NONE"
+      : remainingMinor === 0n
+        ? "FULL"
+        : "PARTIAL";
   const wallet = payment?.provider === "simulated-vietnam-qr"
     ? walletFromReference(payment.providerReference)
     : undefined;
@@ -178,7 +197,17 @@ export function receiptDto(order: Order, payment?: Payment): Record<string, unkn
         : payment
           ? "card"
           : undefined,
-    paymentStatus: payment ? "CAPTURED" : "UNPAID",
+    paymentStatus: refundStatus === "FULL"
+      ? "REFUNDED"
+      : refundStatus === "PARTIAL"
+        ? "PARTIALLY_REFUNDED"
+        : payment
+          ? "CAPTURED"
+          : "UNPAID",
+    refundStatus,
+    refundedMinor: refundedMinor.toString(),
+    remainingMinor: remainingMinor.toString(),
+    refunds: refunds.map(refundDto),
     payment: payment ? paymentDto(payment) : undefined,
     cardBrand: payment?.card?.brand,
     last4: payment?.card?.last4,

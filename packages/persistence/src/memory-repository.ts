@@ -20,6 +20,7 @@ import type {
   AuditQuery,
   IdempotencyClaim,
   IdempotencyRecord,
+  OrderQuery,
   PosRepository,
   ProductQuery,
   ReconciliationQuery,
@@ -220,6 +221,29 @@ export class MemoryPosRepository implements PosRepository {
       throw new RepositoryConflictError("Order cart", cartId);
     }
     return this.create(this.orders, "Order", order);
+  }
+
+  async listOrders(query: OrderQuery = {}): Promise<readonly Order[]> {
+    const search = query.search?.trim().toLocaleLowerCase();
+    const offset = Math.max(0, query.offset ?? 0);
+    const limit = Math.max(0, query.limit ?? 100);
+    return [...this.orders.values()]
+      .filter((order) => !query.status || textField(order, "status") === query.status)
+      .filter((order) => {
+        if (!search) return true;
+        const snapshot = readSnapshot(order);
+        const lines = Array.isArray(snapshot.lines) ? snapshot.lines : [];
+        return [snapshot.id, ...lines.flatMap((line) => {
+          const candidate = readSnapshot(line);
+          return [candidate.name, candidate.sku];
+        })].some(
+          (candidate) =>
+            typeof candidate === "string" && candidate.toLocaleLowerCase().includes(search)
+        );
+      })
+      .sort((left, right) => aggregateSortDate(right) - aggregateSortDate(left))
+      .slice(offset, offset + limit)
+      .map(cloneAggregate);
   }
 
   async getOrder(id: string): Promise<Order | undefined> {

@@ -57,6 +57,7 @@ const cartLineParams = z.object({ id: identifierSchema, lineId: identifierSchema
 const orderIdParams = z.object({ id: identifierSchema });
 const attemptIdParams = z.object({ id: identifierSchema });
 const paymentIdParams = z.object({ id: identifierSchema });
+const orderStatuses = ["OPEN", "PAYMENT_PENDING", "PAID", "CANCELED", "REFUNDED"] as const;
 
 export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyInstance> {
   const config = options.config ?? loadConfig();
@@ -177,9 +178,39 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     return reply.code(201).send(orderDto(order));
   });
 
+  app.get("/v1/orders", async (request) => {
+    const query = z.object({
+      search: z.string().trim().max(160).optional(),
+      status: z.enum(orderStatuses).optional(),
+      limit: z.coerce.number().int().min(1).max(200).default(50),
+      offset: z.coerce.number().int().min(0).default(0)
+    }).parse(request.query);
+    const orders = await service.listOrders(query.search, query.status, query.limit, query.offset);
+    return {
+      orders: orders.map(orderDto),
+      page: { limit: query.limit, offset: query.offset, returned: orders.length }
+    };
+  });
+
   app.get("/v1/orders/:id", async (request) => {
     const { id } = orderIdParams.parse(request.params);
     return orderDto(await service.getOrder(id));
+  });
+
+  app.get("/v1/orders/:id/sale", async (request) => {
+    const { id } = orderIdParams.parse(request.params);
+    const [order, payments] = await Promise.all([
+      service.getOrder(id),
+      service.listPaymentsForOrder(id)
+    ]);
+    const refundGroups = await Promise.all(
+      payments.map((payment) => service.listRefundsForPayment(payment.id))
+    );
+    return {
+      order: orderDto(order),
+      payments: payments.map(paymentDto),
+      refunds: refundGroups.flat().map(refundDto)
+    };
   });
 
   app.post("/v1/orders/:id/payment-attempts", async (request, reply) => {
@@ -260,7 +291,10 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     const { id } = orderIdParams.parse(request.params);
     const order = await service.getOrder(id);
     const payments = await service.listPaymentsForOrder(id);
-    return receiptDto(order, payments[0]);
+    const refunds = payments[0]
+      ? await service.listRefundsForPayment(payments[0].id)
+      : [];
+    return receiptDto(order, payments[0], refunds);
   });
 
   app.post("/v1/providers/simulated/webhooks", async (request, reply) => {
