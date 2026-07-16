@@ -4,7 +4,7 @@ A processor-neutral point-of-sale starter for a single merchant. It deliberately
 
 The included card and Vietnam QR providers are simulators. They are suitable for development only and must be replaced by contracted, certified provider integrations before accepting live payments.
 
-This repository is an executable engineering skeleton, not a production-ready or PCI-certified POS. Authentication/RBAC, transactional webhook inbox processing, fully atomic financial finalization, and a real provider's durable settlement cursor remain deployment work.
+This repository is an executable engineering skeleton, not a production-ready or PCI-certified POS. It now has sandbox staff roles, manager-bound refund approvals, a transactional webhook inbox, rate limits, audit history, redacted API logs, and demo reset controls. Those controls demonstrate the intended design; trusted identity, distributed rate limiting, fully atomic financial finalization, hardened secret storage, and a real provider's durable settlement cursor remain deployment work.
 
 ## What is included
 
@@ -13,7 +13,8 @@ This repository is an executable engineering skeleton, not a production-ready or
 - Domain state machines for carts, orders, payment attempts, payments, and refunds.
 - Provider-neutral payment contracts plus deterministic card and Vietnam QR simulators.
 - In-memory persistence for a zero-setup demo and PostgreSQL persistence for durable environments.
-- Outbox, audit, and reconciliation foundations.
+- Staff login, cashier/manager roles, manager-authorized refunds, audit history, and sandbox reset controls.
+- Transactional webhook inbox deduplication, redacted API logging, rate limiting, outbox, and reconciliation foundations.
 - Tests for money calculations, transitions, idempotency, payment failures, and API workflows.
 
 ## Prerequisites
@@ -31,10 +32,21 @@ npm run dev
 
 Open `http://127.0.0.1:5173`. With no `DATABASE_URL`, the API uses an in-memory repository populated with sample products.
 
+Sign in with one of the local sandbox accounts:
+
+- Cashier: `cashier-01` / `1234`
+- Manager: `manager-01` / `2468`
+
+The manager account can open **Manage**. The cashier account can run sales and can
+request a refund, but a manager must enter their own PIN to approve the exact
+payment and amount. These credentials are intentionally visible for a local demo;
+the register hides them when `PUBLIC_SANDBOX=true`.
+
 The top-right environment control reports `Sandbox · Memory` or
 `Sandbox · PostgreSQL` and shows live readiness for the API, persistence layer,
-card simulator, and Vietnam QR simulator. In memory mode, the register displays a
-warning that restarting the API erases demo transactions.
+card simulator, Vietnam QR simulator, staff authentication, and reset controls. An
+always-visible banner states that the build is simulation-only. In memory mode, the
+register also warns that restarting the API erases demo transactions.
 
 If an existing `.env` contains a PostgreSQL URL but Docker is not running, set
 `PERSISTENCE_MODE=memory`. This explicitly selects the zero-setup sandbox and
@@ -82,21 +94,21 @@ The **Orders** tab is backed by the API repository, not browser session state. I
 search by order number, item name, or SKU; filter by status; open payment details;
 reprint a refund-aware receipt; and issue full or partial sandbox refunds.
 
-1. Set a development key in `.env`, for example
-   `MANAGER_API_KEY=replace-me-to-enable-refunds`, and restart `npm run dev` if it
-   was already running.
-2. Complete a card, cash, or Vietnam QR sandbox sale.
-3. Open **Orders**, select the sale, and choose **Refund**.
-4. Choose **Full remaining** or enter a smaller amount. Enter any non-empty manager
-   ID and use the exact `MANAGER_API_KEY` value as the manager key.
+1. Sign in as the cashier or manager and complete a card, cash, or Vietnam QR
+   sandbox sale.
+2. Open **Orders**, select the sale, and choose **Refund**.
+3. Choose **Full remaining** or enter a smaller amount.
+4. Enter `manager-01` and the local manager PIN, `2468`. The API issues a
+   short-lived signed approval bound to the requesting staff session, payment ID,
+   exact amount, and idempotent refund operation; changing or reusing it for a
+   different operation makes the approval invalid.
 5. Confirm the refund. The order detail and receipt show the refund history, the
    refunded amount, and the remaining net payment. A fully refunded order moves to
    the **Refunded** status filter.
 
 Memory mode keeps order history only until the API process restarts. PostgreSQL mode
 persists the same history across restarts; use the PostgreSQL setup below when you
-want to demonstrate that behavior. The manager key is only a development safeguard,
-not a substitute for staff authentication and role-based access control.
+want to demonstrate that behavior.
 
 ## Manage the sandbox merchant
 
@@ -109,10 +121,29 @@ Open **Manage** to maintain the demo without editing seed files:
 - Enable authoritative line discounts and optional tip shortcuts. Discounted
   taxable amounts, tax, tips, checkout totals, orders, and receipts are calculated
   by the API rather than trusted from the browser.
+- Review actor-attributed audit history and manually reset all transaction data
+  while retaining the catalog and merchant configuration.
 
 Merchant settings and catalog edits last until restart in memory mode and persist
 across restarts in PostgreSQL mode. Changing the merchant currency affects newly
 created carts; an already-open cart keeps its original currency snapshot.
+
+## Share a sandbox demo safely
+
+The API refuses any `APP_MODE` except `sandbox`; this codebase cannot be switched
+into a live-looking payment mode. For a demo exposed beyond your own computer, set
+`PUBLIC_SANDBOX=true`. Startup then requires all of the following:
+
+- unique `AUTH_SECRET` and `SIMULATED_WEBHOOK_SECRET` values of at least 32
+  characters;
+- non-default cashier and manager PINs of at least six digits;
+- explicit `CORS_ORIGINS` rather than a wildcard;
+- authentication and automatic demo reset enabled, with a positive
+  `DEMO_RESET_INTERVAL_MINUTES`.
+
+The built-in limiter is process-local and suitable only for this single-process
+sandbox. Use a shared store, trusted identity provider, TLS, and a real secret
+manager before treating any deployment as production infrastructure.
 
 ## Run with PostgreSQL
 

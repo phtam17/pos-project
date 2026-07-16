@@ -12,7 +12,10 @@ import QRCode from "qrcode";
 import {
   ApiError,
   api,
+  getStoredSession,
   type AmountMinor,
+  type AuditEntryDto,
+  type AuthSessionDto,
   type CartDto,
   type CartLineDto,
   type MerchantSettingsDto,
@@ -140,7 +143,9 @@ function EnvironmentStatus({
     ["API connected", status?.api.connected === true],
     ["Persistence ready", status?.persistence.ready === true],
     ["Card simulator ready", status?.simulators.card.ready === true],
-    ["Vietnam QR simulator ready", status?.simulators.vietnamQr.ready === true]
+    ["Vietnam QR simulator ready", status?.simulators.vietnamQr.ready === true],
+    ["Staff authentication", status?.auth.enabled === true],
+    ["Demo reset ready", status?.demoReset.enabled === true]
   ] as const;
 
   return (
@@ -167,6 +172,9 @@ function EnvironmentStatus({
           </ul>
           {status?.persistence.ephemeral && (
             <p className="environment-caution"><Icon name="alert" /> Restarting the API erases memory-mode carts, orders, and payments.</p>
+          )}
+          {status?.demoReset.automatic && status.demoReset.nextAt && (
+            <p className="environment-reset"><Icon name="retry" /> Automatic demo reset {formatReceiptDate(status.demoReset.nextAt)}.</p>
           )}
           <small>Last checked {status ? formatDate(status.checkedAt) : "now"}</small>
         </section>
@@ -213,6 +221,56 @@ function productInitials(name: string): string {
     .slice(0, 2)
     .map((word) => word[0]?.toUpperCase() ?? "")
     .join("");
+}
+
+function LoginScreen({
+  runtimeStatus,
+  onSignedIn
+}: {
+  runtimeStatus: RuntimeStatusDto | null;
+  onSignedIn: (session: AuthSessionDto) => void;
+}) {
+  const [staffId, setStaffId] = useState("cashier-01");
+  const [pin, setPin] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const showLocalCredentials = runtimeStatus !== null && !runtimeStatus.auth.publicSandbox;
+
+  const submit = async () => {
+    if (!staffId.trim() || !pin) {
+      setError("Enter a staff ID and PIN.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      onSignedIn(await api.login(staffId.trim(), pin));
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <main className="login-page">
+      <section className="login-card" aria-labelledby="login-title">
+        <div className="login-brand"><div className="brand-mark" aria-hidden="true"><span /><span /><span /><span /></div><div><strong>Open POS</strong><span>Staff access</span></div></div>
+        <div className="sandbox-login-badge"><Icon name="lock" /> Sandbox simulation only · no real money</div>
+        <div className="login-heading"><p className="eyebrow">Register sign in</p><h1 id="login-title">Welcome back</h1><p>Sign in as a cashier to run sales or as a manager to configure the demo.</p></div>
+        <form onSubmit={(event) => { event.preventDefault(); void submit(); }}>
+          <label className="field-label">Staff ID<input autoFocus autoComplete="username" value={staffId} onChange={(event) => setStaffId(event.target.value)} disabled={busy} /></label>
+          <label className="field-label">PIN<input type="password" inputMode="numeric" autoComplete="current-password" value={pin} onChange={(event) => setPin(event.target.value)} disabled={busy} /></label>
+          {error && <div className="refund-error" role="alert"><Icon name="alert" />{error}</div>}
+          <button className="login-submit" type="submit" disabled={busy}>{busy ? <span className="spinner" /> : <Icon name="lock" />}Sign in</button>
+        </form>
+        {showLocalCredentials && (
+          <div className="demo-credentials"><span>Local demo accounts</span><button type="button" onClick={() => { setStaffId("cashier-01"); setPin("1234"); }}><strong>Cashier</strong><small>cashier-01 · 1234</small></button><button type="button" onClick={() => { setStaffId("manager-01"); setPin("2468"); }}><strong>Manager</strong><small>manager-01 · 2468</small></button></div>
+        )}
+        <p className="login-runtime"><i className={runtimeStatus?.api.connected ? "ready" : "attention"} />{runtimeStatus ? `API ${runtimeStatus.api.connected ? "connected" : "unavailable"} · ${runtimeStatus.persistence.mode === "postgres" ? "PostgreSQL" : "Memory"}` : "Checking the sandbox API…"}</p>
+      </section>
+    </main>
+  );
 }
 
 function fallbackReceipt(
@@ -608,18 +666,20 @@ function inputToMinor(value: string): bigint | null {
 function RefundDialog({
   detail,
   payment,
+  showDemoHint,
   onClose,
   onRefunded
 }: {
   detail: SaleDetailDto;
   payment: PaymentAttemptDto;
+  showDemoHint: boolean;
   onClose: () => void;
   onRefunded: () => void;
 }) {
   const [amountValue, setAmountValue] = useState(() => minorToInput(detail.remainingMinor));
   const [reason, setReason] = useState("Customer requested refund");
   const [managerId, setManagerId] = useState("manager-01");
-  const [managerKey, setManagerKey] = useState("");
+  const [managerPin, setManagerPin] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
@@ -640,22 +700,29 @@ function RefundDialog({
       setError(`Enter an amount from $0.01 through ${formatMoney(detail.remainingMinor, detail.order.currency)}.`);
       return;
     }
-    if (!reason.trim() || !managerId.trim() || !managerKey) {
-      setError("Reason, manager ID, and manager key are required.");
+    if (!reason.trim() || !managerId.trim() || !managerPin) {
+      setError("Reason, manager ID, and manager PIN are required.");
       return;
     }
     setBusy(true);
     setError(null);
     try {
+      const idempotencyKey = makeIdempotencyKey();
+      const approval = await api.createManagerApproval({
+        managerId: managerId.trim(),
+        managerPin,
+        paymentId: payment.id,
+        amountMinor: amount.toString(),
+        idempotencyKey
+      });
       await api.refundPayment(
         payment.id,
         amount.toString(),
         reason.trim(),
-        managerId.trim(),
-        managerKey,
-        makeIdempotencyKey()
+        approval.approvalToken,
+        idempotencyKey
       );
-      setManagerKey("");
+      setManagerPin("");
       onRefunded();
     } catch (cause) {
       setError(errorMessage(cause));
@@ -688,8 +755,8 @@ function RefundDialog({
           <label className="field-label">Manager ID
             <input type="text" value={managerId} onChange={(event) => setManagerId(event.target.value)} autoComplete="username" disabled={busy} />
           </label>
-          <label className="field-label">Manager key
-            <input type="password" value={managerKey} onChange={(event) => setManagerKey(event.target.value)} autoComplete="current-password" placeholder="From MANAGER_API_KEY" disabled={busy} />
+          <label className="field-label">Manager PIN
+            <input type="password" inputMode="numeric" value={managerPin} onChange={(event) => setManagerPin(event.target.value)} autoComplete="current-password" placeholder={showDemoHint ? "Local demo: 2468" : "Manager PIN"} disabled={busy} />
           </label>
         </div>
         {error && <div className="refund-error" role="alert"><Icon name="alert" />{error}</div>}
@@ -704,10 +771,12 @@ function RefundDialog({
 
 function OrdersView({
   onShowReceipt,
-  onNotice
+  onNotice,
+  showDemoHint
 }: {
   onShowReceipt: (receipt: ReceiptDto) => void;
   onNotice: (message: string) => void;
+  showDemoHint: boolean;
 }) {
   const [orders, setOrders] = useState<OrderDto[]>([]);
   const [search, setSearch] = useState("");
@@ -821,7 +890,7 @@ function OrdersView({
           </>
         )}
       </aside>
-      {refundOpen && detail && payment && <RefundDialog detail={detail} payment={payment} onClose={() => setRefundOpen(false)} onRefunded={refunded} />}
+      {refundOpen && detail && payment && <RefundDialog detail={detail} payment={payment} showDemoHint={showDemoHint} onClose={() => setRefundOpen(false)} onRefunded={refunded} />}
     </main>
   );
 }
@@ -859,15 +928,20 @@ function ManagementView({
   settings,
   onSettingsChanged,
   onCatalogChanged,
-  onNotice
+  onNotice,
+  onSandboxReset
 }: {
   settings: MerchantSettingsDto;
   onSettingsChanged: (settings: MerchantSettingsDto) => void;
   onCatalogChanged: (products: ProductDto[]) => void;
   onNotice: (message: string) => void;
+  onSandboxReset: (resetAt: string) => void;
 }) {
-  const [tab, setTab] = useState<"products" | "store">("products");
+  const [tab, setTab] = useState<"products" | "store" | "security">("products");
   const [products, setProducts] = useState<ProductDto[]>([]);
+  const [auditEntries, setAuditEntries] = useState<AuditEntryDto[]>([]);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [resetArmed, setResetArmed] = useState(false);
   const [productSearch, setProductSearch] = useState("");
   const [draft, setDraft] = useState<ProductDraft>(() => blankProduct(settings.currency));
   const [storeDraft, setStoreDraft] = useState(settings);
@@ -899,6 +973,20 @@ function ManagementView({
   }, []);
 
   useEffect(() => setStoreDraft(settings), [settings]);
+
+  useEffect(() => {
+    if (tab !== "security") return;
+    let active = true;
+    setAuditLoading(true);
+    void api.listAudit(150).then((entries) => {
+      if (active) setAuditEntries(entries);
+    }).catch((cause) => {
+      if (active) setError(errorMessage(cause));
+    }).finally(() => {
+      if (active) setAuditLoading(false);
+    });
+    return () => { active = false; };
+  }, [tab]);
 
   const categories = useMemo(() => Array.from(new Set(products.map((product) => product.category))).sort(), [products]);
   const filtered = useMemo(() => {
@@ -973,11 +1061,31 @@ function ManagementView({
     }
   };
 
+  const resetSandbox = async () => {
+    if (!resetArmed) {
+      setResetArmed(true);
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api.resetSandbox();
+      setAuditEntries(await api.listAudit(150));
+      setResetArmed(false);
+      onSandboxReset(result.resetAt);
+      onNotice("Sandbox transactions were reset. Products and store settings were kept.");
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <main className="management-page">
       <section className="management-panel">
-        <div className="management-heading"><div><p className="eyebrow">Merchant workspace</p><h1>Manage</h1><p>Edit the sandbox catalog, tax behavior, register identity, and receipt options.</p></div></div>
-        <div className="management-tabs" role="tablist"><button className={tab === "products" ? "active" : ""} type="button" role="tab" aria-selected={tab === "products"} onClick={() => setTab("products")}>Products & categories</button><button className={tab === "store" ? "active" : ""} type="button" role="tab" aria-selected={tab === "store"} onClick={() => setTab("store")}>Store & receipts</button></div>
+        <div className="management-heading"><div><p className="eyebrow">Manager workspace</p><h1>Manage</h1><p>Edit the catalog and store, inspect audit history, and maintain the sandbox.</p></div></div>
+        <div className="management-tabs" role="tablist"><button className={tab === "products" ? "active" : ""} type="button" role="tab" aria-selected={tab === "products"} onClick={() => setTab("products")}>Products & categories</button><button className={tab === "store" ? "active" : ""} type="button" role="tab" aria-selected={tab === "store"} onClick={() => setTab("store")}>Store & receipts</button><button className={tab === "security" ? "active" : ""} type="button" role="tab" aria-selected={tab === "security"} onClick={() => setTab("security")}>Security & audit</button></div>
         {error && <div className="error-banner" role="alert"><Icon name="alert" /><span>{error}</span><button type="button" onClick={() => setError(null)}>Dismiss</button></div>}
         {tab === "products" ? (
           <div className="product-management-grid">
@@ -992,13 +1100,25 @@ function ManagementView({
               <button className="save-management" type="submit" disabled={busy}>{busy ? <span className="spinner" /> : <Icon name="check" />}{draft.id ? "Save product" : "Create product"}</button>
             </form>
           </div>
-        ) : (
+        ) : tab === "store" ? (
           <form className="store-settings-form" onSubmit={(event) => { event.preventDefault(); void saveStore(); }}>
             <section><p className="eyebrow">Register identity</p><h2>Store details</h2><div className="form-grid three"><label className="field-label">Store name<input value={storeDraft.merchantName} onChange={(event) => setStoreDraft((current) => ({ ...current, merchantName: event.target.value }))} disabled={busy} /></label><label className="field-label">Location name<input value={storeDraft.locationName} onChange={(event) => setStoreDraft((current) => ({ ...current, locationName: event.target.value }))} disabled={busy} /></label><label className="field-label">Register name<input value={storeDraft.registerName} onChange={(event) => setStoreDraft((current) => ({ ...current, registerName: event.target.value }))} disabled={busy} /></label><label className="field-label">Currency<input value={storeDraft.currency} maxLength={3} onChange={(event) => setStoreDraft((current) => ({ ...current, currency: event.target.value.toUpperCase() }))} disabled={busy} /></label></div></section>
             <section><p className="eyebrow">Printed output</p><h2>Receipt settings</h2><div className="form-grid"><label className="field-label">Receipt header<input value={storeDraft.receiptHeader} onChange={(event) => setStoreDraft((current) => ({ ...current, receiptHeader: event.target.value }))} maxLength={240} disabled={busy} /></label><label className="field-label">Receipt footer<input value={storeDraft.receiptFooter} onChange={(event) => setStoreDraft((current) => ({ ...current, receiptFooter: event.target.value }))} maxLength={240} disabled={busy} /></label></div></section>
             <section className="settings-toggles"><label className="toggle-field"><input type="checkbox" checked={storeDraft.showSkuOnReceipt} onChange={(event) => setStoreDraft((current) => ({ ...current, showSkuOnReceipt: event.target.checked }))} /><span><strong>Show SKU on receipts</strong><small>Useful for demonstrations and item lookup.</small></span></label><label className="toggle-field"><input type="checkbox" checked={storeDraft.discountsEnabled} onChange={(event) => setStoreDraft((current) => ({ ...current, discountsEnabled: event.target.checked }))} /><span><strong>Enable line discounts</strong><small>Discounts recalculate taxable amounts on the API.</small></span></label><label className="toggle-field"><input type="checkbox" checked={storeDraft.tipsEnabled} onChange={(event) => setStoreDraft((current) => ({ ...current, tipsEnabled: event.target.checked }))} /><span><strong>Enable tips</strong><small>Show tip shortcuts before tendering.</small></span></label></section>
             <button className="save-management" type="submit" disabled={busy}>{busy ? <span className="spinner" /> : <Icon name="check" />}Save merchant settings</button>
           </form>
+        ) : (
+          <div className="security-management">
+            <section className="sandbox-operations">
+              <div><p className="eyebrow">Sandbox maintenance</p><h2>Reset demo transactions</h2><p>Clear carts, orders, payments, refunds, webhook events, and prior audit entries. Products and merchant settings stay in place.</p></div>
+              <button className={resetArmed ? "danger armed" : "danger"} type="button" onClick={() => void resetSandbox()} disabled={busy}>{busy ? <span className="spinner" /> : <Icon name={resetArmed ? "alert" : "retry"} />}{resetArmed ? "Click again to confirm reset" : "Reset demo data"}</button>
+              {resetArmed && <button className="cancel-reset" type="button" onClick={() => setResetArmed(false)} disabled={busy}>Cancel</button>}
+            </section>
+            <section className="audit-section">
+              <div className="audit-heading"><div><p className="eyebrow">Accountability</p><h2>Audit history</h2></div><button type="button" onClick={() => { setAuditLoading(true); void api.listAudit(150).then(setAuditEntries).catch((cause) => setError(errorMessage(cause))).finally(() => setAuditLoading(false)); }} disabled={auditLoading}><Icon name="retry" />Refresh</button></div>
+              {auditLoading ? <div className="orders-loading"><span className="spinner" />Loading audit history</div> : auditEntries.length === 0 ? <div className="orders-empty"><Icon name="lock" /><h3>No audit entries</h3><p>Manager changes and protected actions will appear here.</p></div> : <div className="audit-list">{auditEntries.map((entry) => <article key={entry.id}><span className="audit-icon"><Icon name={entry.action.includes("REFUND") ? "retry" : entry.action.includes("LOGIN") ? "lock" : "check"} /></span><div><strong>{entry.action.toLocaleLowerCase().replaceAll("_", " ")}</strong><small>{entry.aggregateType} · {entry.aggregateId.slice(0, 16)}{entry.aggregateId.length > 16 ? "…" : ""}</small></div><span><b>{entry.actorId ?? "system"}</b><small>{formatReceiptDate(entry.occurredAt)}</small></span></article>)}</div>}
+            </section>
+          </div>
         )}
       </section>
     </main>
@@ -1006,6 +1126,7 @@ function ManagementView({
 }
 
 export function App() {
+  const [session, setSession] = useState<AuthSessionDto | null>(() => getStoredSession());
   const [activeView, setActiveView] = useState<"checkout" | "orders" | "manage">("checkout");
   const [products, setProducts] = useState<ProductDto[]>([]);
   const [settings, setSettings] = useState<MerchantSettingsDto | null>(null);
@@ -1029,6 +1150,8 @@ export function App() {
   const [environmentOpen, setEnvironmentOpen] = useState(false);
   const [now, setNow] = useState(() => new Date());
   const initialized = useRef(false);
+  const observedResetAt = useRef<string | null>(null);
+  const resetObservationReady = useRef(false);
   const searchInput = useRef<HTMLInputElement>(null);
   const qrPollInFlight = useRef(false);
 
@@ -1059,14 +1182,27 @@ export function App() {
   };
 
   useEffect(() => {
+    if (!runtimeStatus && !session) return;
+    if (runtimeStatus?.auth.enabled !== false && !session) return;
     if (initialized.current) return;
     initialized.current = true;
     void initialize();
-  }, []);
+  }, [runtimeStatus?.auth.enabled, session?.token]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 30_000);
     return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const signedOut = () => {
+      setSession(null);
+      setActiveView("checkout");
+      initialized.current = false;
+      setPageError("Your staff session expired. Sign in again.");
+    };
+    window.addEventListener("open-pos:unauthorized", signedOut);
+    return () => window.removeEventListener("open-pos:unauthorized", signedOut);
   }, []);
 
   useEffect(() => {
@@ -1454,6 +1590,64 @@ export function App() {
     }
   };
 
+  const signOut = () => {
+    api.logout();
+    setSession(null);
+    setActiveView("checkout");
+    setCart(null);
+    setProducts([]);
+    setSettings(null);
+    setRecentSales([]);
+    setPendingPayment(null);
+    setPendingCheckout(null);
+    setQrAttempt(null);
+    setPaymentState(EMPTY_PAYMENT);
+    initialized.current = false;
+  };
+
+  const signedIn = (nextSession: AuthSessionDto) => {
+    setSession(nextSession);
+    setPageError(null);
+    initialized.current = false;
+  };
+
+  const afterSandboxReset = (resetAt?: string) => {
+    if (resetAt) observedResetAt.current = resetAt;
+    setActiveView("checkout");
+    setCart(null);
+    setReceipt(null);
+    setDiscountLine(null);
+    setRecentSales([]);
+    setPendingPayment(null);
+    setPendingCheckout(null);
+    setQrAttempt(null);
+    setPaymentState(EMPTY_PAYMENT);
+    initialized.current = true;
+    void initialize();
+  };
+
+  useEffect(() => {
+    if (!runtimeStatus) return;
+    const lastResetAt = runtimeStatus?.demoReset.lastAt;
+    if (!resetObservationReady.current) {
+      resetObservationReady.current = true;
+      observedResetAt.current = lastResetAt ?? null;
+      return;
+    }
+    if (!lastResetAt) return;
+    if (observedResetAt.current === lastResetAt) return;
+    observedResetAt.current = lastResetAt;
+    afterSandboxReset();
+    setNotice("The automatic sandbox reset ran. A fresh cart is ready.");
+  }, [runtimeStatus?.demoReset.lastAt, runtimeStatus !== null]);
+
+  const authRequired = runtimeStatus?.auth.enabled !== false;
+  const managerAccess = !authRequired || session?.staff.role === "MANAGER";
+
+  if (authRequired && !session) {
+    return <LoginScreen runtimeStatus={runtimeStatus} onSignedIn={signedIn} />;
+  }
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -1465,15 +1659,18 @@ export function App() {
         <nav className="main-nav" aria-label="Register sections">
           <button className={`nav-item ${activeView === "checkout" ? "active" : ""}`} type="button" onClick={() => setActiveView("checkout")} aria-current={activeView === "checkout" ? "page" : undefined}><Icon name="card" />Checkout</button>
           <button className={`nav-item ${activeView === "orders" ? "active" : ""}`} type="button" onClick={() => setActiveView("orders")} aria-current={activeView === "orders" ? "page" : undefined}><Icon name="orders" />Orders</button>
-          <button className={`nav-item ${activeView === "manage" ? "active" : ""}`} type="button" onClick={() => setActiveView("manage")} aria-current={activeView === "manage" ? "page" : undefined}><Icon name="settings" />Manage</button>
+          {managerAccess && <button className={`nav-item ${activeView === "manage" ? "active" : ""}`} type="button" onClick={() => setActiveView("manage")} aria-current={activeView === "manage" ? "page" : undefined}><Icon name="settings" />Manage</button>}
         </nav>
 
         <div className="register-health">
           <span className="header-time">{new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(now)}</span>
           <EnvironmentStatus status={runtimeStatus} open={environmentOpen} onToggle={() => setEnvironmentOpen((current) => !current)} />
           <span className="reader-pill"><Icon name="signal" /> {runtimeStatus?.simulators.card.ready === false ? "Reader unavailable" : "Reader ready"}</span>
+          {session && <div className="staff-pill"><span><strong>{session.staff.name}</strong><small>{session.staff.role.toLocaleLowerCase()}</small></span><button type="button" onClick={signOut} aria-label="Sign out">Sign out</button></div>}
         </div>
       </header>
+
+      <div className="simulation-only-banner" role="status"><Icon name="lock" /><strong>Sandbox simulation only</strong><span>No real card or QR payment can move money in this build.</span></div>
 
       {runtimeStatus?.persistence.ephemeral && (
         <div className="memory-mode-banner" role="status"><Icon name="alert" /><strong>Sandbox memory mode:</strong> restarting the API erases demo transactions. Use PostgreSQL to keep them.</div>
@@ -1696,7 +1893,7 @@ export function App() {
             </div>
           </div>
         </aside>
-      </main> : activeView === "orders" ? <OrdersView onShowReceipt={setReceipt} onNotice={setNotice} /> : settings ? <ManagementView settings={settings} onSettingsChanged={setSettings} onCatalogChanged={setProducts} onNotice={setNotice} /> : <main className="management-page"><div className="orders-loading"><span className="spinner" />Loading merchant settings</div></main>}
+      </main> : activeView === "orders" ? <OrdersView onShowReceipt={setReceipt} onNotice={setNotice} showDemoHint={runtimeStatus?.auth.publicSandbox === false} /> : settings && managerAccess ? <ManagementView settings={settings} onSettingsChanged={setSettings} onCatalogChanged={setProducts} onNotice={setNotice} onSandboxReset={afterSandboxReset} /> : <main className="management-page"><div className="orders-loading"><span className="spinner" />Loading manager workspace</div></main>}
 
       {notice && <div className="toast" role="status"><Icon name="alert" /><span>{notice}</span><button type="button" onClick={() => setNotice(null)} aria-label="Dismiss notification"><Icon name="close" /></button></div>}
       {receipt && <ReceiptDialog receipt={receipt} onClose={() => setReceipt(null)} />}

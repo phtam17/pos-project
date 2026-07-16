@@ -79,6 +79,12 @@ describe("SimulatedVietnamQrProvider", () => {
       feeAmount: new Money(63n, "USD"),
       netAmount: new Money(2_437n, "USD"),
     });
+
+    provider.resetSandbox();
+    expect((await provider.listSettlements()).items).toEqual([]);
+    await expect(provider.startSale(sale("approved"))).resolves.toMatchObject({
+      status: "PROCESSING"
+    });
   });
 
   it("delivers delayed callbacks through status polling and ignores duplicates", async () => {

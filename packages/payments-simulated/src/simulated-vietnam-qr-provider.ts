@@ -96,6 +96,16 @@ export class SimulatedVietnamQrProvider implements PaymentProvider {
     this.settlementPageSize = positiveInteger(options.settlementPageSize ?? 100, "settlementPageSize");
   }
 
+  /** Clears all provider-side state for the sandbox demo reset workflow. */
+  resetSandbox(): void {
+    this.salesByAttempt.clear();
+    this.attemptByIdempotencyKey.clear();
+    this.salesByPaymentId.clear();
+    this.refundsByIdempotencyKey.clear();
+    this.refundedByPaymentId.clear();
+    this.settlementItems.length = 0;
+  }
+
   async startSale(input: StartSaleRequest): Promise<PaymentResult> {
     assertNoSensitiveCardData(input);
     validateSale(input);

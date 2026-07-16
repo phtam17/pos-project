@@ -20,6 +20,7 @@ import { ZodError, z } from "zod";
 
 import { loadConfig, type ApiConfig } from "./config.js";
 import {
+  auditEntryDto,
   cartDto,
   merchantSettingsDto,
   orderDto,
@@ -35,16 +36,21 @@ import {
   createProductSchema,
   idempotencyKeySchema,
   identifierSchema,
+  managerApprovalSchema,
   merchantSettingsSchema,
   paymentAttemptSchema,
   refundSchema,
   sandboxVietnamQrCompletionSchema,
-  sandboxVietnamQrScanSchema
+  sandboxVietnamQrScanSchema,
+  staffLoginSchema
 } from "./schemas.js";
+import { SandboxAuth, type StaffSession } from "./auth.js";
+import { createRateLimitHook } from "./rate-limit.js";
 
 declare module "fastify" {
   interface FastifyRequest {
     rawBody?: Uint8Array;
+    staff?: StaffSession;
   }
 }
 
@@ -78,7 +84,66 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   const sandboxVietnamQrProvider = new SimulatedVietnamQrProvider();
   const providers = options.paymentProviders ?? [cardProvider, sandboxVietnamQrProvider];
   const service = new PosService(repository, providers);
-  const app = Fastify({ logger: options.logger ?? true, bodyLimit: 1_048_576 });
+  const authEnabled = config.authEnabled ?? true;
+  const auth = new SandboxAuth(config);
+  const app = Fastify({
+    logger: options.logger === false ? false : {
+      level: "info",
+      redact: {
+        paths: [
+          "req.headers.authorization",
+          "req.headers.x-manager-key",
+          "req.headers.x-manager-approval",
+          "req.body.pin",
+          "req.body.managerPin",
+          "rawBody"
+        ],
+        censor: "[Redacted]"
+      }
+    },
+    bodyLimit: 1_048_576
+  });
+  const resetEnabled = config.demoResetEnabled ?? true;
+  const resetIntervalMinutes = config.demoResetIntervalMinutes ?? 0;
+  let nextDemoResetAt: Date | null = null;
+  let lastDemoResetAt: Date | null = null;
+  let resetTimer: ReturnType<typeof setTimeout> | undefined;
+  let activeAutomaticReset: Promise<void> | undefined;
+  let resetRunning = false;
+  let closing = false;
+
+  const scheduleAutomaticReset = () => {
+    if (resetTimer) clearTimeout(resetTimer);
+    resetTimer = undefined;
+    if (closing || !resetEnabled || resetIntervalMinutes <= 0) {
+      nextDemoResetAt = null;
+      return;
+    }
+    const delayMs = resetIntervalMinutes * 60_000;
+    nextDemoResetAt = new Date(Date.now() + delayMs);
+    resetTimer = setTimeout(() => {
+      if (resetRunning) {
+        scheduleAutomaticReset();
+        return;
+      }
+      resetRunning = true;
+      activeAutomaticReset = service.resetDemoData("system:auto-reset")
+        .then(() => {
+          lastDemoResetAt = new Date();
+          app.log.info({ action: "DEMO_DATA_RESET" }, "Automatic sandbox reset completed");
+        })
+        .catch((error: unknown) => {
+          app.log.error({ err: error, action: "DEMO_DATA_RESET_FAILED" }, "Automatic sandbox reset failed");
+        })
+        .finally(() => {
+          resetRunning = false;
+          activeAutomaticReset = undefined;
+          scheduleAutomaticReset();
+        });
+      void activeAutomaticReset;
+    }, delayMs);
+    resetTimer.unref();
+  };
 
   app.removeContentTypeParser("application/json");
   app.addContentTypeParser(
@@ -101,9 +166,52 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
   await app.register(cors, {
     origin: config.corsOrigins.length === 0 ? false : [...config.corsOrigins],
-    allowedHeaders: ["Content-Type", "Idempotency-Key", "X-Manager-Id", "X-Manager-Key"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "Idempotency-Key",
+      "X-Manager-Approval",
+      "X-Manager-Id",
+      "X-Manager-Key"
+    ],
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
   });
+
+  if (config.rateLimitEnabled ?? true) {
+    app.addHook("onRequest", createRateLimitHook({
+      generalMax: config.rateLimitMax ?? 240,
+      generalWindowMs: config.rateLimitWindowMs ?? 60_000,
+      loginMax: config.loginRateLimitMax ?? 8,
+      loginWindowMs: config.loginRateLimitWindowMs ?? 300_000
+    }));
+  }
+
+  app.addHook("onRequest", async (_request, reply) => {
+    reply.header("X-Open-POS-Mode", "sandbox");
+    reply.header("Cache-Control", "no-store");
+  });
+
+  app.addHook("preHandler", async (request) => {
+    if (!authEnabled || request.method === "OPTIONS" || isPublicRoute(request.url)) return;
+    const authorization = request.headers.authorization;
+    if (!authorization?.startsWith("Bearer ")) {
+      throw new ApplicationError("Authentication is required", "UNAUTHORIZED", 401);
+    }
+    request.staff = auth.verifySession(authorization.slice("Bearer ".length));
+  });
+
+  const requireStaff = (request: { readonly staff?: StaffSession }): StaffSession | undefined => {
+    if (!authEnabled) return undefined;
+    if (!request.staff) throw new ApplicationError("Authentication is required", "UNAUTHORIZED", 401);
+    return request.staff;
+  };
+  const requireManager = (request: { readonly staff?: StaffSession }): StaffSession | undefined => {
+    const staff = requireStaff(request);
+    if (staff && staff.role !== "MANAGER") {
+      throw new ApplicationError("Manager role is required", "FORBIDDEN", 403);
+    }
+    return staff;
+  };
 
   app.get("/health", async () => ({
     status: "live",
@@ -162,10 +270,80 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
           provider: vietnamQrProviderStatus?.name ?? null
         }
       },
+      auth: {
+        enabled: authEnabled,
+        publicSandbox: config.publicSandbox ?? false
+      },
+      demoReset: {
+        enabled: resetEnabled,
+        automatic: resetEnabled && resetIntervalMinutes > 0,
+        nextAt: nextDemoResetAt?.toISOString() ?? null,
+        lastAt: lastDemoResetAt?.toISOString() ?? null
+      },
       warnings: persistenceMode === "memory"
         ? ["Memory mode erases carts, orders, payments, and settings when the API restarts."]
         : [],
       checkedAt: new Date().toISOString()
+    };
+  });
+
+  app.post("/v1/auth/login", async (request) => {
+    if (!authEnabled) {
+      throw new ApplicationError("Staff authentication is disabled", "AUTH_DISABLED", 404);
+    }
+    const body = staffLoginSchema.parse(request.body);
+    const result = auth.login(body.staffId, body.pin);
+    await service.recordAudit("StaffSession", result.session.id, "STAFF_LOGGED_IN", {
+      role: result.session.role
+    }, result.session.id);
+    return {
+      token: result.token,
+      staff: {
+        id: result.session.id,
+        name: result.session.name,
+        role: result.session.role
+      },
+      expiresAt: result.session.expiresAt.toISOString()
+    };
+  });
+
+  app.get("/v1/auth/me", async (request) => {
+    const staff = requireStaff(request);
+    return staff ? {
+      staff: { id: staff.id, name: staff.name, role: staff.role },
+      expiresAt: staff.expiresAt.toISOString()
+    } : { authDisabled: true };
+  });
+
+  app.post("/v1/auth/manager-approvals", async (request) => {
+    const staff = requireStaff(request);
+    if (!staff) throw new ApplicationError("Authentication is required", "UNAUTHORIZED", 401);
+    const body = managerApprovalSchema.parse(request.body);
+    let approval: ReturnType<SandboxAuth["createManagerApproval"]>;
+    try {
+      approval = auth.createManagerApproval({
+        managerId: body.managerId,
+        managerPin: body.managerPin,
+        requestedBy: staff,
+        paymentId: body.paymentId,
+        amountMinor: body.amountMinor,
+        idempotencyKey: body.idempotencyKey
+      });
+    } catch (error) {
+      await service.recordAudit("Payment", body.paymentId, "MANAGER_APPROVAL_DENIED", {
+        requestedBy: staff.id,
+        managerId: body.managerId
+      }, staff.id);
+      throw error;
+    }
+    await service.recordAudit("Payment", body.paymentId, "MANAGER_APPROVAL_GRANTED", {
+      requestedBy: staff.id,
+      amountMinor: body.amountMinor
+    }, approval.approvedBy);
+    return {
+      approvalToken: approval.token,
+      approvedBy: approval.approvedBy,
+      expiresAt: approval.expiresAt.toISOString()
     };
   });
 
@@ -177,6 +355,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       includeInactive: z.enum(["true", "false"]).default("false")
     })
       .parse(request.query);
+    if (query.includeInactive === "true") requireManager(request);
     const products = await service.listProducts(
       query.search,
       query.limit,
@@ -190,16 +369,22 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
 
   app.post("/v1/products", async (request, reply) => {
+    const staff = requireManager(request);
     const body = createProductSchema.parse(request.body);
-    const command: CreateProductCommand = body;
+    const command: CreateProductCommand = { ...body, ...(staff ? { actorId: staff.id } : {}) };
     const product = await service.createProduct(command);
     return reply.code(201).send(productDto(product));
   });
 
   app.put("/v1/products/:id", async (request) => {
+    const staff = requireManager(request);
     const { id } = productIdParams.parse(request.params);
     const body = createProductSchema.parse(request.body);
-    return productDto(await service.updateProduct({ productId: id, ...body }));
+    return productDto(await service.updateProduct({
+      productId: id,
+      ...body,
+      ...(staff ? { actorId: staff.id } : {})
+    }));
   });
 
   app.get("/v1/merchant-settings", async () => {
@@ -207,15 +392,20 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
 
   app.put("/v1/merchant-settings", async (request) => {
+    const staff = requireManager(request);
     const body = merchantSettingsSchema.parse(request.body);
-    return merchantSettingsDto(await service.updateMerchantSettings(body));
+    return merchantSettingsDto(await service.updateMerchantSettings({
+      ...body,
+      ...(staff ? { actorId: staff.id } : {})
+    }));
   });
 
   app.post("/v1/carts", async (request, reply) => {
+    const staff = requireStaff(request);
     const body = z.object({ currency: z.string().trim().length(3).optional() })
       .strict()
       .parse(request.body ?? {});
-    const cart = await service.createCart(body.currency?.toUpperCase() ?? "USD");
+    const cart = await service.createCart(body.currency?.toUpperCase(), staff?.id);
     return reply.code(201).send(cartDto(cart));
   });
 
@@ -225,33 +415,38 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
 
   app.post("/v1/carts/:id/lines", async (request, reply) => {
+    const staff = requireStaff(request);
     const { id } = cartIdParams.parse(request.params);
     const body = addCartLineSchema.parse(request.body);
-    const cart = await service.addCartLine(id, body.productId, body.quantity);
+    const cart = await service.addCartLine(id, body.productId, body.quantity, staff?.id);
     return reply.code(201).send(cartDto(cart));
   });
 
   app.delete("/v1/carts/:id/lines/:lineId", async (request) => {
+    const staff = requireStaff(request);
     const { id, lineId } = cartLineParams.parse(request.params);
-    return cartDto(await service.removeCartLine(id, lineId));
+    return cartDto(await service.removeCartLine(id, lineId, staff?.id));
   });
 
   app.put("/v1/carts/:id/lines/:lineId/discount", async (request) => {
+    const staff = requireStaff(request);
     const { id, lineId } = cartLineParams.parse(request.params);
     const body = cartMoneyAdjustmentSchema.parse(request.body);
-    return cartDto(await service.applyCartLineDiscount(id, lineId, body.amountMinor));
+    return cartDto(await service.applyCartLineDiscount(id, lineId, body.amountMinor, staff?.id));
   });
 
   app.put("/v1/carts/:id/tip", async (request) => {
+    const staff = requireStaff(request);
     const { id } = cartIdParams.parse(request.params);
     const body = cartMoneyAdjustmentSchema.parse(request.body);
-    return cartDto(await service.setCartTip(id, body.amountMinor));
+    return cartDto(await service.setCartTip(id, body.amountMinor, staff?.id));
   });
 
   app.post("/v1/carts/:id/checkout", async (request, reply) => {
+    const staff = requireStaff(request);
     const { id } = cartIdParams.parse(request.params);
     const idempotencyKey = idempotencyKeySchema.parse(request.headers["idempotency-key"]);
-    const order = await service.checkout(id, idempotencyKey);
+    const order = await service.checkout(id, idempotencyKey, staff?.id);
     return reply.code(201).send(orderDto(order));
   });
 
@@ -294,6 +489,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
 
   app.post("/v1/orders/:id/payment-attempts", async (request, reply) => {
+    const staff = requireStaff(request);
     const { id } = orderIdParams.parse(request.params);
     const body = paymentAttemptSchema.parse(request.body);
     const idempotencyKey = idempotencyKeySchema.parse(request.headers["idempotency-key"]);
@@ -301,7 +497,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       orderId: id,
       tender: body.tender,
       ...(body.terminalId ? { terminalId: body.terminalId } : {}),
-      idempotencyKey
+      idempotencyKey,
+      ...(staff ? { actorId: staff.id } : {})
     });
     if (result.replayed) reply.header("Idempotent-Replayed", "true");
     return reply.code(result.replayed ? 200 : 201).send(
@@ -364,16 +561,30 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     const { id } = paymentIdParams.parse(request.params);
     const body = refundSchema.parse(request.body);
     const idempotencyKey = idempotencyKeySchema.parse(request.headers["idempotency-key"]);
-    const managerId = z.string().trim().min(1).parse(request.headers["x-manager-id"]);
-    if (!config.managerApiKey) {
-      throw new ApplicationError(
-        "Refunds are disabled until MANAGER_API_KEY is configured",
-        "REFUNDS_DISABLED",
-        503
-      );
-    }
-    if (request.headers["x-manager-key"] !== config.managerApiKey) {
-      throw new ApplicationError("Manager authorization failed", "FORBIDDEN", 403);
+    let managerId: string;
+    if (authEnabled) {
+      const staff = requireStaff(request);
+      if (!staff) throw new ApplicationError("Authentication is required", "UNAUTHORIZED", 401);
+      const approvalToken = z.string().trim().min(1).parse(request.headers["x-manager-approval"]);
+      managerId = auth.verifyManagerApproval(
+        approvalToken,
+        staff,
+        id,
+        body.amountMinor,
+        idempotencyKey
+      ).approvedBy;
+    } else {
+      managerId = z.string().trim().min(1).parse(request.headers["x-manager-id"]);
+      if (!config.managerApiKey) {
+        throw new ApplicationError(
+          "Refunds are disabled until MANAGER_API_KEY is configured",
+          "REFUNDS_DISABLED",
+          503
+        );
+      }
+      if (request.headers["x-manager-key"] !== config.managerApiKey) {
+        throw new ApplicationError("Manager authorization failed", "FORBIDDEN", 403);
+      }
     }
     const result = await service.refundPayment({
       paymentId: id,
@@ -405,8 +616,50 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     if (!rawBody) {
       throw new ApplicationError("Webhook raw body is unavailable", "RAW_BODY_REQUIRED", 400);
     }
-    const event = await service.verifyWebhook(rawBody, headerRecord(request.headers));
-    return reply.code(202).send({ received: true, eventId: event.id });
+    const result = await service.verifyWebhook(rawBody, headerRecord(request.headers));
+    return reply.code(202).send({
+      received: true,
+      eventId: result.event.id,
+      replayed: result.replayed
+    });
+  });
+
+  app.get("/v1/audit", async (request) => {
+    requireManager(request);
+    const query = z.object({
+      aggregateType: z.string().trim().min(1).max(120).optional(),
+      aggregateId: identifierSchema.optional(),
+      limit: z.coerce.number().int().min(1).max(500).default(100)
+    }).parse(request.query);
+    const entries = await service.listAudit({
+      limit: query.limit,
+      ...(query.aggregateType ? { aggregateType: query.aggregateType } : {}),
+      ...(query.aggregateId ? { aggregateId: query.aggregateId } : {})
+    });
+    return { entries: entries.map(auditEntryDto) };
+  });
+
+  app.post("/v1/sandbox/reset", async (request, reply) => {
+    const staff = requireManager(request);
+    if (!resetEnabled) {
+      throw new ApplicationError("Sandbox reset is disabled", "SANDBOX_RESET_DISABLED", 503);
+    }
+    if (resetRunning) {
+      throw new ApplicationError("A sandbox reset is already in progress", "SANDBOX_RESET_IN_PROGRESS", 409);
+    }
+    resetRunning = true;
+    try {
+      await service.resetDemoData(staff?.id);
+      lastDemoResetAt = new Date();
+    } finally {
+      resetRunning = false;
+    }
+    scheduleAutomaticReset();
+    return reply.code(200).send({
+      reset: true,
+      resetAt: lastDemoResetAt?.toISOString() ?? new Date().toISOString(),
+      nextAutomaticResetAt: nextDemoResetAt?.toISOString() ?? null
+    });
   });
 
   app.get("/v1/reconciliation/summary", async (request) => {
@@ -441,15 +694,36 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
   app.setErrorHandler(async (error, request, reply) => {
     const mapped = mapError(error);
-    if (mapped.status >= 500) request.log.error({ err: error }, mapped.message);
-    else request.log.info({ err: error }, mapped.message);
+    const context = {
+      code: mapped.code,
+      method: request.method,
+      path: request.url.split("?", 1)[0]
+    };
+    if (mapped.status >= 500) request.log.error({ ...context, err: error }, mapped.message);
+    else request.log.info(context, mapped.message);
     return reply.code(mapped.status).send({
       error: { code: mapped.code, message: mapped.message }
     });
   });
 
-  app.addHook("onClose", async () => service.close());
+  scheduleAutomaticReset();
+
+  app.addHook("onClose", async () => {
+    closing = true;
+    if (resetTimer) clearTimeout(resetTimer);
+    if (activeAutomaticReset) await activeAutomaticReset;
+    await service.close();
+  });
   return app;
+}
+
+function isPublicRoute(url: string): boolean {
+  const path = url.split("?", 1)[0];
+  return path === "/health"
+    || path === "/ready"
+    || path === "/v1/runtime-status"
+    || path === "/v1/auth/login"
+    || path === "/v1/providers/simulated/webhooks";
 }
 
 function headerRecord(

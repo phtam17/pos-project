@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
 import {
   AuditEntry,
   Cart,
@@ -14,7 +16,7 @@ import {
   type OrderLineSnapshot,
   type SettlementLineSnapshot
 } from "@pos/domain";
-import { Pool, type PoolClient, type QueryResultRow } from "pg";
+import { Pool, type PoolClient, type QueryResult, type QueryResultRow } from "pg";
 
 import { decodeAggregate, encodeAggregate } from "./codec.js";
 import {
@@ -29,6 +31,8 @@ import type {
   IdempotencyRecord,
   OrderQuery,
   PosRepository,
+  ProviderInboxClaim,
+  ProviderInboxEvent,
   ProductQuery,
   ReconciliationQuery,
   ReconciliationSummary
@@ -66,6 +70,20 @@ interface IdRow extends QueryResultRow {
   id: string;
 }
 
+interface ProviderInboxRow extends QueryResultRow {
+  provider: string;
+  event_id: string;
+  event_type: string;
+  payload_hash: string;
+  metadata: Record<string, unknown>;
+  status: ProviderInboxEvent["status"];
+  attempts: number;
+  received_at: Date;
+  updated_at: Date;
+  processed_at: Date | null;
+  last_error: string | null;
+}
+
 export interface PostgresPosRepositoryOptions {
   readonly connectionString?: string;
   readonly pool?: Pool;
@@ -91,6 +109,22 @@ function mapIdempotency(row: IdempotencyRow): IdempotencyRecord {
   });
 }
 
+function mapProviderInbox(row: ProviderInboxRow): ProviderInboxEvent {
+  return Object.freeze({
+    provider: row.provider,
+    eventId: row.event_id,
+    eventType: row.event_type,
+    payloadHash: row.payload_hash,
+    metadata: Object.freeze({ ...row.metadata }),
+    status: row.status,
+    attempts: row.attempts,
+    receivedAt: new Date(row.received_at),
+    updatedAt: new Date(row.updated_at),
+    ...(row.processed_at === null ? {} : { processedAt: new Date(row.processed_at) }),
+    ...(row.last_error === null ? {} : { lastError: row.last_error })
+  });
+}
+
 function isPgError(error: unknown): error is { code?: string; constraint?: string } {
   return error !== null && typeof error === "object" && "code" in error;
 }
@@ -109,27 +143,30 @@ function translateWriteError(error: unknown, entity: string, id: string): never 
   throw error;
 }
 
-async function inTransaction<T>(pool: Pool, work: (client: PoolClient) => Promise<T>): Promise<T> {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    const value = await work(client);
-    await client.query("COMMIT");
-    return value;
-  } catch (error) {
-    await client.query("ROLLBACK");
-    throw error;
-  } finally {
-    client.release();
-  }
-}
-
 export class PostgresPosRepository implements PosRepository {
   readonly pool: Pool;
   private readonly ownsPool: boolean;
+  private readonly transactionContext = new AsyncLocalStorage<PoolClient>();
+
+  async withTransaction<T>(work: () => Promise<T>): Promise<T> {
+    const active = this.transactionContext.getStore();
+    if (active) return work();
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const value = await this.transactionContext.run(client, work);
+      await client.query("COMMIT");
+      return value;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
 
   async healthCheck(): Promise<void> {
-    await this.pool.query("SELECT 1");
+    await this.query("SELECT 1");
   }
 
   constructor(options: PostgresPosRepositoryOptions) {
@@ -159,7 +196,7 @@ export class PostgresPosRepository implements PosRepository {
     values.push(Math.max(0, query.offset ?? 0));
     const offset = `$${values.length}`;
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-    const result = await this.pool.query<SnapshotRow>(
+    const result = await this.query<SnapshotRow>(
       `SELECT snapshot FROM products ${where} ORDER BY name, id LIMIT ${limit} OFFSET ${offset}`,
       values
     );
@@ -172,7 +209,7 @@ export class PostgresPosRepository implements PosRepository {
 
   async createProduct(product: Product): Promise<Product> {
     try {
-      await this.pool.query(
+      await this.query(
         `INSERT INTO products
           (id, sku, name, category, barcode, unit_price_minor, currency, tax_rate_bps, active, snapshot)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
@@ -197,7 +234,7 @@ export class PostgresPosRepository implements PosRepository {
 
   async saveProduct(product: Product): Promise<Product> {
     try {
-      const result = await this.pool.query(
+      const result = await this.query(
         `UPDATE products
             SET sku = $2, name = $3, category = $4, barcode = $5,
                 unit_price_minor = $6, currency = $7, tax_rate_bps = $8,
@@ -225,7 +262,7 @@ export class PostgresPosRepository implements PosRepository {
   }
 
   async getMerchantSettings(): Promise<MerchantSettings> {
-    const result = await this.pool.query<SnapshotRow>(
+    const result = await this.query<SnapshotRow>(
       "SELECT snapshot FROM merchant_settings WHERE id = 'default'"
     );
     const row = result.rows[0];
@@ -236,7 +273,7 @@ export class PostgresPosRepository implements PosRepository {
 
   async saveMerchantSettings(settings: MerchantSettings): Promise<MerchantSettings> {
     const snapshot = settings.toSnapshot();
-    await this.pool.query(
+    await this.query(
       `INSERT INTO merchant_settings (id, version, snapshot, created_at, updated_at)
        VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (id) DO UPDATE SET
@@ -250,7 +287,7 @@ export class PostgresPosRepository implements PosRepository {
 
   async createCart(cart: Cart): Promise<Cart> {
     try {
-      await inTransaction(this.pool, async (client) => {
+      await this.withClientTransaction(async (client) => {
         const snapshot = cart.toSnapshot();
         await client.query(
           `INSERT INTO carts (id, status, currency, version, snapshot, created_at, updated_at)
@@ -279,7 +316,7 @@ export class PostgresPosRepository implements PosRepository {
 
   async saveCart(cart: Cart, expectedVersion?: number): Promise<Cart> {
     try {
-      await inTransaction(this.pool, async (client) => {
+      await this.withClientTransaction(async (client) => {
         const snapshot = cart.toSnapshot();
         const values: unknown[] = [
           cart.id,
@@ -319,7 +356,7 @@ export class PostgresPosRepository implements PosRepository {
 
   async createOrder(order: Order): Promise<Order> {
     try {
-      await inTransaction(this.pool, async (client) => {
+      await this.withClientTransaction(async (client) => {
         const snapshot = order.toSnapshot();
         await client.query(
           `INSERT INTO orders
@@ -379,7 +416,7 @@ export class PostgresPosRepository implements PosRepository {
     values.push(Math.max(0, query.offset ?? 0));
     const offset = `$${values.length}`;
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-    const result = await this.pool.query<SnapshotRow>(
+    const result = await this.query<SnapshotRow>(
       `SELECT orders.snapshot FROM orders ${where}
        ORDER BY orders.created_at DESC, orders.id DESC
        LIMIT ${limit} OFFSET ${offset}`,
@@ -393,7 +430,7 @@ export class PostgresPosRepository implements PosRepository {
   }
 
   async findOrderByCartId(cartId: string): Promise<Order | undefined> {
-    const result = await this.pool.query<SnapshotRow>(
+    const result = await this.query<SnapshotRow>(
       "SELECT snapshot FROM orders WHERE cart_id = $1",
       [cartId]
     );
@@ -418,7 +455,7 @@ export class PostgresPosRepository implements PosRepository {
         ? ""
         : (values.push(expectedVersion), ` AND version = $${values.length}`);
     try {
-      const result = await this.pool.query(
+      const result = await this.query(
         `UPDATE orders
             SET status = $2, version = $3, snapshot = $4, updated_at = $5,
                 completed_at = $6
@@ -436,7 +473,7 @@ export class PostgresPosRepository implements PosRepository {
   async createPaymentAttempt(attempt: PaymentAttempt): Promise<PaymentAttempt> {
     const snapshot = attempt.toSnapshot();
     try {
-      await this.pool.query(
+      await this.query(
         `INSERT INTO payment_attempts
           (id, order_id, provider, provider_reference, terminal_id, status,
            amount_minor, currency, idempotency_key, failure_code, version,
@@ -473,7 +510,7 @@ export class PostgresPosRepository implements PosRepository {
     const orderSnapshot = order.toSnapshot();
     const attemptSnapshot = attempt.toSnapshot();
     try {
-      await inTransaction(this.pool, async (client) => {
+      await this.withClientTransaction(async (client) => {
         const orderResult = await client.query(
           `UPDATE orders
               SET status = $2, version = $3, snapshot = $4, updated_at = $5,
@@ -550,7 +587,7 @@ export class PostgresPosRepository implements PosRepository {
         ? ""
         : (values.push(expectedVersion), ` AND version = $${values.length}`);
     try {
-      const result = await this.pool.query(
+      const result = await this.query(
         `UPDATE payment_attempts
             SET provider_reference = $2, status = $3, failure_code = $4,
                 version = $5, snapshot = $6, updated_at = $7
@@ -573,7 +610,7 @@ export class PostgresPosRepository implements PosRepository {
   async createPayment(payment: Payment): Promise<Payment> {
     const snapshot = payment.toSnapshot();
     try {
-      await this.pool.query(
+      await this.query(
         `INSERT INTO payments
           (id, order_id, attempt_id, provider, provider_payment_id, status,
            amount_minor, currency, card_brand, card_last4, entry_method,
@@ -608,7 +645,7 @@ export class PostgresPosRepository implements PosRepository {
     provider: string,
     providerReference: string
   ): Promise<Payment | undefined> {
-    const result = await this.pool.query<SnapshotRow>(
+    const result = await this.query<SnapshotRow>(
       `SELECT snapshot FROM payments
         WHERE provider = $1 AND provider_payment_id = $2`,
       [provider, providerReference]
@@ -618,7 +655,7 @@ export class PostgresPosRepository implements PosRepository {
   }
 
   async listPaymentsForOrder(orderId: string): Promise<readonly Payment[]> {
-    const result = await this.pool.query<SnapshotRow>(
+    const result = await this.query<SnapshotRow>(
       "SELECT snapshot FROM payments WHERE order_id = $1 ORDER BY captured_at, id",
       [orderId]
     );
@@ -628,7 +665,7 @@ export class PostgresPosRepository implements PosRepository {
   async createRefund(refund: Refund): Promise<Refund> {
     const snapshot = refund.toSnapshot();
     try {
-      await this.pool.query(
+      await this.query(
         `INSERT INTO refunds
           (id, payment_id, provider, provider_refund_id, status, amount_minor,
            currency, idempotency_key, failure_code, version, snapshot,
@@ -660,7 +697,7 @@ export class PostgresPosRepository implements PosRepository {
   async reserveRefund(refund: Refund): Promise<Refund> {
     const snapshot = refund.toSnapshot();
     try {
-      return await inTransaction(this.pool, async (client) => {
+      return await this.withClientTransaction(async (client) => {
         const paymentResult = await client.query<
           QueryResultRow & { amount_minor: string; currency: string }
         >(
@@ -730,7 +767,7 @@ export class PostgresPosRepository implements PosRepository {
         ? ""
         : (values.push(expectedVersion), ` AND version = $${values.length}`);
     try {
-      const result = await this.pool.query(
+      const result = await this.query(
         `UPDATE refunds
             SET provider_refund_id = $2, status = $3, failure_code = $4,
                 version = $5, snapshot = $6, updated_at = $7, processed_at = $8
@@ -746,7 +783,7 @@ export class PostgresPosRepository implements PosRepository {
   }
 
   async listRefundsForPayment(paymentId: string): Promise<readonly Refund[]> {
-    const result = await this.pool.query<SnapshotRow>(
+    const result = await this.query<SnapshotRow>(
       "SELECT snapshot FROM refunds WHERE payment_id = $1 ORDER BY created_at, id",
       [paymentId]
     );
@@ -757,7 +794,7 @@ export class PostgresPosRepository implements PosRepository {
     provider: string,
     providerReference: string
   ): Promise<Refund | undefined> {
-    const result = await this.pool.query<SnapshotRow>(
+    const result = await this.query<SnapshotRow>(
       `SELECT snapshot FROM refunds
         WHERE provider = $1 AND provider_refund_id = $2`,
       [provider, providerReference]
@@ -770,7 +807,7 @@ export class PostgresPosRepository implements PosRepository {
     scope: string,
     key: string
   ): Promise<IdempotencyRecord | undefined> {
-    const result = await this.pool.query<IdempotencyRow>(
+    const result = await this.query<IdempotencyRow>(
       "SELECT * FROM idempotency_records WHERE scope = $1 AND key = $2",
       [scope, key]
     );
@@ -779,7 +816,7 @@ export class PostgresPosRepository implements PosRepository {
   }
 
   async claimIdempotency(record: IdempotencyRecord): Promise<IdempotencyClaim> {
-    const inserted = await this.pool.query<IdempotencyRow>(
+    const inserted = await this.query<IdempotencyRow>(
       `INSERT INTO idempotency_records
         (scope, key, request_hash, state, response_status, response_body,
          resource_id, created_at, updated_at, expires_at)
@@ -813,7 +850,7 @@ export class PostgresPosRepository implements PosRepository {
     const responseStatus = record.responseStatus ?? null;
     const responseBody = record.responseBody ?? null;
     const resourceId = record.resourceId ?? null;
-    const result = await this.pool.query<IdempotencyRow>(
+    const result = await this.query<IdempotencyRow>(
       `INSERT INTO idempotency_records
         (scope, key, request_hash, state, response_status, response_body,
          resource_id, created_at, updated_at, expires_at)
@@ -848,7 +885,7 @@ export class PostgresPosRepository implements PosRepository {
   async appendAudit(entry: AuditEntry): Promise<void> {
     const snapshot = entry.toSnapshot();
     try {
-      await this.pool.query(
+      await this.query(
         `INSERT INTO audit_events
           (id, aggregate_type, aggregate_id, action, actor_id, details, snapshot, occurred_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
@@ -881,7 +918,7 @@ export class PostgresPosRepository implements PosRepository {
     }
     values.push(Math.max(0, query.limit ?? 100));
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-    const result = await this.pool.query<SnapshotRow>(
+    const result = await this.query<SnapshotRow>(
       `SELECT snapshot FROM audit_events ${where}
        ORDER BY occurred_at DESC, id DESC LIMIT $${values.length}`,
       values
@@ -889,10 +926,106 @@ export class PostgresPosRepository implements PosRepository {
     return result.rows.map((row) => decodeAggregate(row.snapshot, AuditEntry));
   }
 
+  async claimProviderEvent(event: ProviderInboxEvent): Promise<ProviderInboxClaim> {
+    const result = await this.query<ProviderInboxRow>(
+      `INSERT INTO provider_webhook_inbox
+        (provider, event_id, event_type, payload_hash, metadata, status, attempts,
+         received_at, updated_at, processed_at, last_error)
+       VALUES ($1, $2, $3, $4, $5, 'PROCESSING', 1, $6, $7, NULL, NULL)
+       ON CONFLICT (provider, event_id) DO UPDATE SET
+         event_type = EXCLUDED.event_type,
+         payload_hash = EXCLUDED.payload_hash,
+         metadata = EXCLUDED.metadata,
+         status = 'PROCESSING',
+         attempts = provider_webhook_inbox.attempts + 1,
+         updated_at = EXCLUDED.updated_at,
+         processed_at = NULL,
+         last_error = NULL
+       WHERE provider_webhook_inbox.status = 'FAILED'
+         AND provider_webhook_inbox.payload_hash = EXCLUDED.payload_hash
+       RETURNING *`,
+      [
+        event.provider,
+        event.eventId,
+        event.eventType,
+        event.payloadHash,
+        event.metadata,
+        event.receivedAt,
+        event.updatedAt
+      ]
+    );
+    const claimed = result.rows[0];
+    if (claimed) return { record: mapProviderInbox(claimed), claimed: true };
+    const existing = await this.query<ProviderInboxRow>(
+      "SELECT * FROM provider_webhook_inbox WHERE provider = $1 AND event_id = $2",
+      [event.provider, event.eventId]
+    );
+    const row = existing.rows[0];
+    if (!row) throw new RepositoryNotFoundError("ProviderInboxEvent", `${event.provider}:${event.eventId}`);
+    if (row.payload_hash !== event.payloadHash) {
+      throw new RepositoryConflictError("ProviderInboxEvent payload", `${event.provider}:${event.eventId}`);
+    }
+    return { record: mapProviderInbox(row), claimed: false };
+  }
+
+  async completeProviderEvent(provider: string, eventId: string, processedAt: Date): Promise<void> {
+    const result = await this.query(
+      `UPDATE provider_webhook_inbox
+          SET status = 'PROCESSED', processed_at = $3, updated_at = $3, last_error = NULL
+        WHERE provider = $1 AND event_id = $2 AND status = 'PROCESSING'`,
+      [provider, eventId, processedAt]
+    );
+    if (!result.rowCount) {
+      throw new RepositoryNotFoundError("ProviderInboxEvent", `${provider}:${eventId}`);
+    }
+  }
+
+  async failProviderEvent(event: ProviderInboxEvent, error: string, failedAt: Date): Promise<void> {
+    await this.query(
+      `INSERT INTO provider_webhook_inbox
+        (provider, event_id, event_type, payload_hash, metadata, status, attempts,
+         received_at, updated_at, processed_at, last_error)
+       VALUES ($1, $2, $3, $4, $5, 'FAILED', 1, $6, $7, NULL, $8)
+       ON CONFLICT (provider, event_id) DO UPDATE SET
+         status = 'FAILED', updated_at = EXCLUDED.updated_at,
+         processed_at = NULL, last_error = EXCLUDED.last_error
+       WHERE provider_webhook_inbox.status = 'FAILED'
+         AND provider_webhook_inbox.payload_hash = EXCLUDED.payload_hash`,
+      [
+        event.provider,
+        event.eventId,
+        event.eventType,
+        event.payloadHash,
+        event.metadata,
+        event.receivedAt,
+        failedAt,
+        error.slice(0, 500)
+      ]
+    );
+  }
+
+  async resetDemoData(): Promise<void> {
+    await this.withTransaction(async () => {
+      await this.query("DELETE FROM settlement_lines");
+      await this.query("DELETE FROM settlement_batches");
+      await this.query("DELETE FROM outbox_events");
+      await this.query("DELETE FROM audit_events");
+      await this.query("DELETE FROM provider_webhook_inbox");
+      await this.query("DELETE FROM refunds");
+      await this.query("DELETE FROM payments");
+      await this.query("DELETE FROM payment_attempts");
+      await this.query("DELETE FROM order_lines");
+      await this.query("DELETE FROM orders");
+      await this.query("DELETE FROM cart_lines");
+      await this.query("DELETE FROM carts");
+      await this.query("DELETE FROM idempotency_records");
+    });
+  }
+
   async enqueueOutbox(message: OutboxMessage): Promise<void> {
     const snapshot = message.toSnapshot();
     try {
-      await this.pool.query(
+      await this.query(
         `INSERT INTO outbox_events
           (id, aggregate_type, aggregate_id, event_type, payload, snapshot,
            occurred_at, published_at, attempts, last_error)
@@ -918,7 +1051,7 @@ export class PostgresPosRepository implements PosRepository {
     limit = 100,
     now = new Date()
   ): Promise<readonly OutboxMessage[]> {
-    const result = await this.pool.query<SnapshotRow>(
+    const result = await this.query<SnapshotRow>(
       `SELECT snapshot FROM outbox_events
         WHERE published_at IS NULL AND (locked_until IS NULL OR locked_until <= $1)
         ORDER BY occurred_at, id
@@ -933,7 +1066,7 @@ export class PostgresPosRepository implements PosRepository {
     now = new Date(),
     lockedUntil = new Date(now.getTime() + 30_000)
   ): Promise<readonly OutboxMessage[]> {
-    const result = await this.pool.query<SnapshotRow>(
+    const result = await this.query<SnapshotRow>(
       `WITH candidates AS (
          SELECT id FROM outbox_events
           WHERE published_at IS NULL AND (locked_until IS NULL OR locked_until <= $1)
@@ -952,7 +1085,7 @@ export class PostgresPosRepository implements PosRepository {
   }
 
   async markOutboxPublished(id: string, publishedAt = new Date()): Promise<void> {
-    await inTransaction(this.pool, async (client) => {
+    await this.withClientTransaction(async (client) => {
       const result = await client.query<SnapshotRow & { published_at: Date | null }>(
         "SELECT snapshot, published_at FROM outbox_events WHERE id = $1 FOR UPDATE",
         [id]
@@ -978,7 +1111,7 @@ export class PostgresPosRepository implements PosRepository {
     error: string,
     retryAt = new Date(Date.now() + 30_000)
   ): Promise<void> {
-    await inTransaction(this.pool, async (client) => {
+    await this.withClientTransaction(async (client) => {
       const result = await client.query<SnapshotRow>(
         "SELECT snapshot FROM outbox_events WHERE id = $1 FOR UPDATE",
         [id]
@@ -1013,7 +1146,7 @@ export class PostgresPosRepository implements PosRepository {
       }
     }
     try {
-      await inTransaction(this.pool, async (client) => {
+      await this.withClientTransaction(async (client) => {
         await client.query(
           `INSERT INTO settlement_batches
             (id, provider, provider_batch_id, status, currency, gross_minor,
@@ -1049,7 +1182,7 @@ export class PostgresPosRepository implements PosRepository {
   }
 
   async hasSettlementLine(id: string): Promise<boolean> {
-    const result = await this.pool.query("SELECT 1 FROM settlement_lines WHERE id = $1", [id]);
+    const result = await this.query("SELECT 1 FROM settlement_lines WHERE id = $1", [id]);
     return (result.rowCount ?? 0) > 0;
   }
 
@@ -1075,14 +1208,14 @@ export class PostgresPosRepository implements PosRepository {
       AND ($5::text IS NULL OR o.location_id = $5)`;
     const [paymentResult, refundResult, settlementResult, paymentsMissing, refundsMissing] =
       await Promise.all([
-        this.pool.query<SummaryRow>(
+        this.query<SummaryRow>(
           `SELECT count(*)::text AS count,
                   COALESCE(sum(p.amount_minor), 0)::text AS amount
              FROM payments p JOIN orders o ON o.id = p.order_id
             WHERE ${paymentFilter} AND p.status <> 'VOIDED'`,
           params
         ),
-        this.pool.query<SummaryRow>(
+        this.query<SummaryRow>(
           `SELECT count(*)::text AS count,
                   COALESCE(sum(r.amount_minor), 0)::text AS amount
              FROM refunds r
@@ -1091,7 +1224,7 @@ export class PostgresPosRepository implements PosRepository {
             WHERE ${refundFilter}`,
           params
         ),
-        this.pool.query<SettlementSummaryRow>(
+        this.query<SettlementSummaryRow>(
           `SELECT COALESCE(sum(sl.gross_minor), 0)::text AS gross,
                   COALESCE(sum(sl.fee_minor), 0)::text AS fees,
                   COALESCE(sum(sl.net_minor), 0)::text AS net
@@ -1108,7 +1241,7 @@ export class PostgresPosRepository implements PosRepository {
               AND ($5::text IS NULL OR settled_order.location_id = $5)`,
           params
         ),
-        this.pool.query<IdRow>(
+        this.query<IdRow>(
           `SELECT p.id FROM payments p JOIN orders o ON o.id = p.order_id
             WHERE ${paymentFilter} AND p.status <> 'VOIDED'
               AND NOT EXISTS (
@@ -1122,7 +1255,7 @@ export class PostgresPosRepository implements PosRepository {
               ) ORDER BY p.id`,
           params
         ),
-        this.pool.query<IdRow>(
+        this.query<IdRow>(
           `SELECT r.id
              FROM refunds r
              JOIN payments p ON p.id = r.payment_id
@@ -1167,6 +1300,26 @@ export class PostgresPosRepository implements PosRepository {
     if (this.ownsPool) await this.pool.end();
   }
 
+  private query<R extends QueryResultRow = QueryResultRow>(
+    text: string,
+    values: unknown[] = []
+  ): Promise<QueryResult<R>> {
+    const executor = this.transactionContext.getStore() ?? this.pool;
+    return executor.query<R>(text, values);
+  }
+
+  private async withClientTransaction<T>(
+    work: (client: PoolClient) => Promise<T>
+  ): Promise<T> {
+    const active = this.transactionContext.getStore();
+    if (active) return work(active);
+    return this.withTransaction(async () => {
+      const client = this.transactionContext.getStore();
+      if (!client) throw new PersistenceError("Transaction context is unavailable", "INTERNAL_ERROR");
+      return work(client);
+    });
+  }
+
   private async getAggregate<T>(
     table: string,
     id: string,
@@ -1182,7 +1335,7 @@ export class PostgresPosRepository implements PosRepository {
       "settlement_batches"
     ]);
     if (!allowedTables.has(table)) throw new TypeError(`Unsupported repository table: ${table}`);
-    const result = await this.pool.query<SnapshotRow>(
+    const result = await this.query<SnapshotRow>(
       `SELECT snapshot FROM ${table} WHERE id = $1`,
       [id]
     );
@@ -1205,7 +1358,7 @@ export class PostgresPosRepository implements PosRepository {
     };
     const table = tables[entity];
     if (!table) throw new PersistenceError(`Unknown aggregate ${entity}`, "INTERNAL_ERROR");
-    const exists = await this.pool.query(`SELECT 1 FROM ${table} WHERE id = $1`, [id]);
+    const exists = await this.query(`SELECT 1 FROM ${table} WHERE id = $1`, [id]);
     if (exists.rowCount && optimistic) throw new RepositoryConflictError(entity, id);
     throw new RepositoryNotFoundError(entity, id);
   }

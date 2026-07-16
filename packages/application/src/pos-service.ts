@@ -27,7 +27,9 @@ import {
   RepositoryConflictError,
   type IdempotencyRecord,
   type IdempotencyClaim,
+  type AuditQuery,
   type PosRepository,
+  type ProviderInboxEvent,
   type ReconciliationQuery,
   type ReconciliationSummary
 } from "@pos/persistence";
@@ -68,6 +70,7 @@ export interface StartPaymentCommand {
   readonly tender: "cash" | "card" | "vietnam_qr";
   readonly terminalId?: string;
   readonly idempotencyKey: string;
+  readonly actorId?: string;
 }
 
 export interface StartPaymentResult {
@@ -88,6 +91,11 @@ export interface RefundCommand {
 
 export interface RefundCommandResult {
   readonly refund: Refund;
+  readonly replayed: boolean;
+}
+
+export interface VerifiedWebhookResult {
+  readonly event: ProviderEvent;
   readonly replayed: boolean;
 }
 
@@ -238,11 +246,11 @@ export class PosService {
     return settings;
   }
 
-  async createCart(currency?: string): Promise<Cart> {
+  async createCart(currency?: string, actorId?: string): Promise<Cart> {
     const selectedCurrency = currency ?? (await this.repository.getMerchantSettings()).currency;
     const cart = new Cart({ id: randomUUID(), currency: selectedCurrency });
     await this.repository.createCart(cart);
-    await this.record("Cart", cart.id, "CART_CREATED", { currency: cart.currency });
+    await this.record("Cart", cart.id, "CART_CREATED", { currency: cart.currency }, actorId ?? null);
     return cart;
   }
 
@@ -250,7 +258,7 @@ export class PosService {
     return (await this.repository.getCart(id)) ?? Promise.reject(notFound("Cart", id));
   }
 
-  async addCartLine(cartId: string, productId: string, quantity: number): Promise<Cart> {
+  async addCartLine(cartId: string, productId: string, quantity: number, actorId?: string): Promise<Cart> {
     const [cart, product] = await Promise.all([
       this.getCart(cartId),
       this.repository.getProduct(productId)
@@ -261,16 +269,16 @@ export class PosService {
     // Using product.id alone would collide when two carts contain the same SKU.
     cart.addProduct(product, quantity, `${cart.id}:${product.id}`, this.now());
     await this.repository.saveCart(cart, expectedVersion);
-    await this.record("Cart", cart.id, "CART_LINE_ADDED", { productId, quantity });
+    await this.record("Cart", cart.id, "CART_LINE_ADDED", { productId, quantity }, actorId ?? null);
     return cart;
   }
 
-  async removeCartLine(cartId: string, lineId: string): Promise<Cart> {
+  async removeCartLine(cartId: string, lineId: string, actorId?: string): Promise<Cart> {
     const cart = await this.getCart(cartId);
     const expectedVersion = cart.version;
     cart.removeLine(lineId, this.now());
     await this.repository.saveCart(cart, expectedVersion);
-    await this.record("Cart", cart.id, "CART_LINE_REMOVED", { lineId });
+    await this.record("Cart", cart.id, "CART_LINE_REMOVED", { lineId }, actorId ?? null);
     return cart;
   }
 
@@ -320,7 +328,7 @@ export class PosService {
     return cart;
   }
 
-  async checkout(cartId: string, idempotencyKey: string): Promise<Order> {
+  async checkout(cartId: string, idempotencyKey: string, actorId?: string): Promise<Order> {
     const scope = `cart-checkout:${cartId}`;
     const requestHash = hashRequest({ cartId });
     const cart = await this.getCart(cartId);
@@ -374,7 +382,7 @@ export class PosService {
       cartId,
       totalMinor: order.total.minorUnits.toString(),
       currency: order.currency
-    });
+    }, actorId ?? null);
     return order;
   }
 
@@ -488,6 +496,12 @@ export class PosService {
       }
       throw error;
     }
+
+    await this.record("PaymentAttempt", attempt.id, "PAYMENT_STARTED", {
+      orderId: order.id,
+      tender: command.tender,
+      amountMinor: order.total.minorUnits.toString()
+    }, command.actorId ?? null);
 
     if (command.tender === "cash") {
       const applied = await this.applyProviderResult(order, attempt, {
@@ -814,15 +828,71 @@ export class PosService {
     rawBody: Uint8Array,
     headers: ProviderWebhookHeaders,
     providerName = this.defaultPaymentProvider.name
-  ): Promise<ProviderEvent> {
+  ): Promise<VerifiedWebhookResult> {
     const event = await this.providerForName(providerName).verifyWebhook(rawBody, headers);
-    await this.record("ProviderEvent", event.id, "PROVIDER_EVENT_VERIFIED", {
-      type: event.type,
-      occurredAt: event.occurredAt.toISOString()
-    });
+    const receivedAt = this.now();
     const attemptId = event.data.attemptId;
-    if (typeof attemptId === "string") await this.getPaymentAttempt(attemptId, true);
-    return event;
+    const inboxEvent: ProviderInboxEvent = {
+      provider: providerName,
+      eventId: event.id,
+      eventType: event.type,
+      payloadHash: createHash("sha256").update(rawBody).digest("hex"),
+      metadata: {
+        occurredAt: event.occurredAt.toISOString(),
+        ...(typeof attemptId === "string" ? { attemptId } : {})
+      },
+      status: "PROCESSING",
+      attempts: 0,
+      receivedAt,
+      updatedAt: receivedAt
+    };
+    let claimed = false;
+    try {
+      return await this.repository.withTransaction(async () => {
+        const claim = await this.repository.claimProviderEvent(inboxEvent);
+        if (!claim.claimed) return { event, replayed: true };
+        claimed = true;
+        await this.record("ProviderEvent", event.id, "PROVIDER_EVENT_VERIFIED", {
+          provider: providerName,
+          type: event.type,
+          occurredAt: event.occurredAt.toISOString()
+        });
+        if (typeof attemptId === "string") await this.getPaymentAttempt(attemptId, true);
+        await this.repository.completeProviderEvent(providerName, event.id, this.now());
+        return { event, replayed: false };
+      });
+    } catch (error) {
+      if (claimed) {
+        await this.repository.failProviderEvent(
+          inboxEvent,
+          error instanceof Error ? error.message : "Provider event processing failed",
+          this.now()
+        );
+      }
+      throw error;
+    }
+  }
+
+  listAudit(query: AuditQuery = {}): Promise<readonly AuditEntry[]> {
+    return this.repository.listAudit(query);
+  }
+
+  recordAudit(
+    aggregateType: string,
+    aggregateId: string,
+    action: string,
+    metadata: Readonly<Record<string, unknown>>,
+    actorId?: string
+  ): Promise<void> {
+    return this.record(aggregateType, aggregateId, action, metadata, actorId ?? null);
+  }
+
+  async resetDemoData(actorId?: string): Promise<void> {
+    await this.repository.resetDemoData();
+    await Promise.all([...this.paymentProviders.values()].map(async (provider) => {
+      if (isSandboxResettable(provider)) await provider.resetSandbox();
+    }));
+    await this.record("Sandbox", "default", "DEMO_DATA_RESET", {}, actorId ?? null);
   }
 
   reconciliationSummary(query: ReconciliationQuery): Promise<ReconciliationSummary> {
@@ -1355,6 +1425,13 @@ export class PosService {
       expiresAt: new Date(timestamp.getTime() + 24 * 60 * 60 * 1000)
     });
   }
+}
+
+function isSandboxResettable(
+  provider: PaymentProvider
+): provider is PaymentProvider & { resetSandbox(): void | Promise<void> } {
+  return "resetSandbox" in provider
+    && typeof (provider as { resetSandbox?: unknown }).resetSandbox === "function";
 }
 
 function parseMinor(value: string): bigint {

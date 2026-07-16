@@ -35,11 +35,35 @@ Only provider references and receipt-safe metadata explicitly documented by the 
 - invalid cart/order/payment state transitions;
 - raw card-like fields at the HTTP and provider-adapter boundaries;
 - malformed JSON, provider-response loss, paginated settlement replay, multi-currency batches, and settlement amount mismatches.
+- signed sandbox staff sessions, cashier/manager authorization boundaries, exact-amount
+  manager refund approvals, login rate limits, and actor-attributed audit entries;
+- transactional provider-event claiming, duplicate webhook delivery, and rollback
+  of failed in-memory inbox processing.
+
+## Sandbox controls implemented here
+
+- HMAC-signed, expiring local staff sessions with cashier and manager roles.
+- Short-lived manager approvals bound to the requesting session, payment, refund
+  amount, and idempotent refund operation.
+- A unique provider webhook inbox processed in a PostgreSQL transaction (with a
+  rollback-capable serialized transaction in memory mode).
+- Process-local request/credential-attempt rate limiting, structured log redaction, and
+  sanitized client errors.
+- Manager-visible audit history, manual transaction reset, optional automatic
+  demo reset, and startup rejection of live mode.
+- Strict startup checks when `PUBLIC_SANDBOX=true`, including non-default secrets,
+  stronger PINs, explicit CORS origins, and automatic reset.
+
+These are demonstrator controls. Local PIN credentials, stateless HMAC tokens, and
+an in-process limiter are not substitutes for trusted production identity, token
+revocation, a distributed limiter, or device authorization.
 
 ## Production security work still required
 
-- Persist and deduplicate forged, duplicate, delayed, and out-of-order provider events.
-- Add authenticated staff/device identity, trusted RBAC, location isolation, and manager approval. `MANAGER_API_KEY` only gates the demo refund endpoint; it is not a complete identity system.
+- Enforce provider-specific timestamp/replay windows and ordering rules in addition
+  to the persisted unique event IDs already used by the sandbox inbox.
+- Replace local sandbox staff credentials with trusted staff/device identity,
+  revocable sessions, location isolation, and centrally managed RBAC.
 - Add automated log/trace leakage scanning and verify that analytics and support tooling cannot receive account data.
 - Make aggregate, idempotency, audit, and outbox writes one database transaction per use case.
 - Reject simulator, memory persistence, default secrets, and missing identity configuration at production startup.

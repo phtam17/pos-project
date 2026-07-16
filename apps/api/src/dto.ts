@@ -1,4 +1,5 @@
 import type {
+  AuditEntry,
   Cart,
   MerchantSettings,
   Order,
@@ -12,6 +13,18 @@ import type { PaymentPresentation, WalletPaymentSummary } from "@pos/payment-con
 
 function amount(value: { readonly minorUnits: bigint }): string {
   return value.minorUnits.toString();
+}
+
+export function auditEntryDto(entry: AuditEntry): Record<string, unknown> {
+  return {
+    id: entry.id,
+    aggregateType: entry.aggregateType,
+    aggregateId: entry.aggregateId,
+    action: entry.action,
+    actorId: entry.actorId,
+    metadata: entry.metadata,
+    occurredAt: entry.occurredAt.toISOString()
+  };
 }
 
 export function productDto(product: Product): Record<string, unknown> {

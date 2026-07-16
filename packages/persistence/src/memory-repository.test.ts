@@ -285,6 +285,41 @@ describe("MemoryPosRepository", () => {
     await repository.markOutboxPublished(message.id, new Date(at.getTime() + 1_000));
     expect(await repository.listPendingOutbox()).toEqual([]);
   });
+
+  it("atomically claims provider events and rolls back failed inbox work", async () => {
+    const repository = new MemoryPosRepository();
+    const at = new Date("2026-01-10T12:00:00.000Z");
+    const providerEvent = {
+      provider: "simulated",
+      eventId: "event-1",
+      eventType: "payment.updated",
+      payloadHash: "hash-1",
+      metadata: {},
+      status: "PROCESSING" as const,
+      attempts: 0,
+      receivedAt: at,
+      updatedAt: at
+    };
+
+    await expect(repository.withTransaction(async () => {
+      expect((await repository.claimProviderEvent(providerEvent)).claimed).toBe(true);
+      await repository.appendAudit(new AuditEntry({
+        id: "audit-rollback",
+        aggregateType: "ProviderEvent",
+        aggregateId: "event-1",
+        action: "VERIFIED",
+        actorId: null,
+        metadata: {},
+        occurredAt: at
+      }));
+      throw new Error("simulate processing failure");
+    })).rejects.toThrow("simulate processing failure");
+
+    expect(await repository.listAudit()).toEqual([]);
+    expect((await repository.claimProviderEvent(providerEvent)).claimed).toBe(true);
+    await repository.completeProviderEvent("simulated", "event-1", at);
+    expect((await repository.claimProviderEvent(providerEvent)).claimed).toBe(false);
+  });
 });
 
 function productFixture(): Product {

@@ -15,7 +15,9 @@ const config: ApiConfig = {
   host: "127.0.0.1",
   port: 3000,
   simulatedWebhookSecret: "test-webhook-secret",
-  corsOrigins: []
+  corsOrigins: [],
+  authEnabled: false,
+  rateLimitEnabled: false
 };
 
 const openApps: Awaited<ReturnType<typeof buildApp>>[] = [];
@@ -1256,5 +1258,225 @@ describe("POS API vertical slice", () => {
     const refundedOrders = await instance.inject({ method: "GET", url: "/v1/orders?status=REFUNDED" });
     expect(refundedOrders.json<{ orders: Array<{ id: string }> }>().orders.map((item) => item.id))
       .toContain(order.id);
+  });
+
+  it("enforces staff roles and manager-bound refund approvals, audits actions, and resets demo data", async () => {
+    const securedConfig: ApiConfig = {
+      ...config,
+      authEnabled: true,
+      authSecret: "unit-test-auth-secret-that-is-not-used-outside-tests",
+      staffCredentials: [
+        { id: "cashier-01", name: "Test Cashier", role: "CASHIER", pin: "123456" },
+        { id: "manager-01", name: "Test Manager", role: "MANAGER", pin: "246810" }
+      ],
+      demoResetEnabled: true
+    };
+    const securedProvider = new SimulatedPaymentProvider({
+      webhookSecret: securedConfig.simulatedWebhookSecret
+    });
+    const instance = await buildApp({
+      config: securedConfig,
+      logger: false,
+      paymentProvider: securedProvider
+    });
+    openApps.push(instance);
+
+    expect((await instance.inject({ method: "GET", url: "/v1/products" })).statusCode).toBe(401);
+
+    const login = async (staffId: string, pin: string) => {
+      const response = await instance.inject({
+        method: "POST",
+        url: "/v1/auth/login",
+        payload: { staffId, pin }
+      });
+      expect(response.statusCode).toBe(200);
+      return response.json<{ token: string; staff: { role: string } }>();
+    };
+    const cashier = await login("cashier-01", "123456");
+    const manager = await login("manager-01", "246810");
+    expect(cashier.staff.role).toBe("CASHIER");
+    expect(manager.staff.role).toBe("MANAGER");
+    const cashierHeaders = { authorization: `Bearer ${cashier.token}` };
+    const managerHeaders = { authorization: `Bearer ${manager.token}` };
+
+    const productsResponse = await instance.inject({
+      method: "GET",
+      url: "/v1/products",
+      headers: cashierHeaders
+    });
+    expect(productsResponse.statusCode).toBe(200);
+    expect((await instance.inject({
+      method: "GET",
+      url: "/v1/products?includeInactive=true",
+      headers: cashierHeaders
+    })).statusCode).toBe(403);
+    expect((await instance.inject({
+      method: "GET",
+      url: "/v1/products?includeInactive=true",
+      headers: managerHeaders
+    })).statusCode).toBe(200);
+
+    const productId = productsResponse.json<{ products: Array<{ id: string }> }>().products[0]!.id;
+    const cart = (await instance.inject({
+      method: "POST",
+      url: "/v1/carts",
+      headers: cashierHeaders,
+      payload: {}
+    })).json<{ id: string }>();
+    await instance.inject({
+      method: "POST",
+      url: `/v1/carts/${cart.id}/lines`,
+      headers: cashierHeaders,
+      payload: { productId, quantity: 1 }
+    });
+    const order = (await instance.inject({
+      method: "POST",
+      url: `/v1/carts/${cart.id}/checkout`,
+      headers: { ...cashierHeaders, "idempotency-key": "secured-checkout-key" }
+    })).json<{ id: string }>();
+    const payment = (await instance.inject({
+      method: "POST",
+      url: `/v1/orders/${order.id}/payment-attempts`,
+      headers: { ...cashierHeaders, "idempotency-key": "secured-payment-key" },
+      payload: { tender: "card", terminalId: "secured-test-reader" }
+    })).json<{ paymentId: string; amountMinor: string }>();
+
+    const approvedRefundKey = "approved-refund-key";
+    expect((await instance.inject({
+      method: "POST",
+      url: "/v1/auth/manager-approvals",
+      headers: cashierHeaders,
+      payload: {
+        managerId: "manager-01",
+        managerPin: "000000",
+        paymentId: payment.paymentId,
+        amountMinor: payment.amountMinor,
+        idempotencyKey: approvedRefundKey
+      }
+    })).statusCode).toBe(401);
+    const approvalResponse = await instance.inject({
+      method: "POST",
+      url: "/v1/auth/manager-approvals",
+      headers: cashierHeaders,
+      payload: {
+        managerId: "manager-01",
+        managerPin: "246810",
+        paymentId: payment.paymentId,
+        amountMinor: payment.amountMinor,
+        idempotencyKey: approvedRefundKey
+      }
+    });
+    expect(approvalResponse.statusCode).toBe(200);
+    const approval = approvalResponse.json<{ approvalToken: string; approvedBy: string }>();
+    expect(approval.approvedBy).toBe("manager-01");
+
+    const mismatchedRefund = await instance.inject({
+      method: "POST",
+      url: `/v1/payments/${payment.paymentId}/refunds`,
+      headers: {
+        ...cashierHeaders,
+        "idempotency-key": approvedRefundKey,
+        "x-manager-approval": approval.approvalToken
+      },
+      payload: { amountMinor: "1", reason: "Wrong amount test" }
+    });
+    expect(mismatchedRefund.statusCode).toBe(403);
+
+    const refund = await instance.inject({
+      method: "POST",
+      url: `/v1/payments/${payment.paymentId}/refunds`,
+      headers: {
+        ...cashierHeaders,
+        "idempotency-key": approvedRefundKey,
+        "x-manager-approval": approval.approvalToken
+      },
+      payload: { amountMinor: payment.amountMinor, reason: "Approved sandbox return" }
+    });
+    expect(refund.statusCode).toBe(201);
+    expect((await instance.inject({
+      method: "POST",
+      url: `/v1/payments/${payment.paymentId}/refunds`,
+      headers: {
+        ...cashierHeaders,
+        "idempotency-key": "approval-reuse-blocked",
+        "x-manager-approval": approval.approvalToken
+      },
+      payload: { amountMinor: payment.amountMinor, reason: "Approval replay test" }
+    })).statusCode).toBe(403);
+
+    const audit = await instance.inject({ method: "GET", url: "/v1/audit", headers: managerHeaders });
+    expect(audit.statusCode).toBe(200);
+    const auditEntries = audit.json<{ entries: Array<{ action: string; actorId: string | null }> }>().entries;
+    const actions = auditEntries.map((entry) => entry.action);
+    expect(actions).toContain("MANAGER_APPROVAL_GRANTED");
+    expect(actions).toContain("MANAGER_APPROVAL_DENIED");
+    expect(actions).toContain("REFUND_UPDATED");
+    expect(auditEntries).toContainEqual(expect.objectContaining({
+      action: "PAYMENT_STARTED",
+      actorId: "cashier-01"
+    }));
+    expect((await instance.inject({ method: "GET", url: "/v1/audit", headers: cashierHeaders })).statusCode)
+      .toBe(403);
+
+    const webhookPayload = {
+      id: "sandbox-webhook-duplicate-test",
+      type: "payment.updated",
+      occurredAt: new Date().toISOString(),
+      data: {}
+    };
+    const webhookRequest = {
+      method: "POST" as const,
+      url: "/v1/providers/simulated/webhooks",
+      headers: { "x-simulated-signature": securedConfig.simulatedWebhookSecret },
+      payload: webhookPayload
+    };
+    expect((await instance.inject(webhookRequest)).json<{ replayed: boolean }>().replayed).toBe(false);
+    expect((await instance.inject(webhookRequest)).json<{ replayed: boolean }>().replayed).toBe(true);
+    expect((await instance.inject({
+      ...webhookRequest,
+      payload: { ...webhookPayload, type: "payment.changed-with-conflicting-payload" }
+    })).statusCode).toBe(409);
+    expect((await instance.inject(webhookRequest)).json<{ replayed: boolean }>().replayed).toBe(true);
+
+    const reset = await instance.inject({ method: "POST", url: "/v1/sandbox/reset", headers: managerHeaders });
+    expect(reset.statusCode).toBe(200);
+    const resetAt = reset.json<{ resetAt: string }>().resetAt;
+    expect((await instance.inject({ method: "GET", url: "/v1/runtime-status" }))
+      .json<{ demoReset: { lastAt: string } }>().demoReset.lastAt).toBe(resetAt);
+    expect((await securedProvider.listSettlements()).items).toEqual([]);
+    expect((await instance.inject({ method: "GET", url: "/v1/orders", headers: managerHeaders }))
+      .json<{ orders: unknown[] }>().orders).toEqual([]);
+    expect((await instance.inject({ method: "GET", url: "/v1/products", headers: managerHeaders }))
+      .json<{ products: unknown[] }>().products.length).toBeGreaterThan(0);
+  });
+
+  it("rate limits repeated staff login attempts", async () => {
+    const instance = await buildApp({
+      config: {
+        ...config,
+        authEnabled: true,
+        authSecret: "rate-limit-test-secret",
+        staffCredentials: [
+          { id: "cashier-01", name: "Test Cashier", role: "CASHIER", pin: "123456" }
+        ],
+        rateLimitEnabled: true,
+        loginRateLimitMax: 2,
+        loginRateLimitWindowMs: 60_000,
+        rateLimitMax: 100,
+        rateLimitWindowMs: 60_000
+      },
+      logger: false
+    });
+    openApps.push(instance);
+    const badLogin = () => instance.inject({
+      method: "POST" as const,
+      url: "/v1/auth/login",
+      payload: { staffId: "cashier-01", pin: "wrong" }
+    });
+    expect((await badLogin()).statusCode).toBe(401);
+    expect((await badLogin()).statusCode).toBe(401);
+    const limited = await badLogin();
+    expect(limited.statusCode).toBe(429);
+    expect(limited.headers["retry-after"]).toBeDefined();
   });
 });

@@ -85,6 +85,16 @@ export class SimulatedPaymentProvider implements PaymentProvider {
     this.settlementPageSize = pageSize;
   }
 
+  /** Clears all provider-side state for the sandbox demo reset workflow. */
+  resetSandbox(): void {
+    this.salesByAttempt.clear();
+    this.attemptByIdempotencyKey.clear();
+    this.salesByPaymentId.clear();
+    this.refundsByIdempotencyKey.clear();
+    this.refundedByPaymentId.clear();
+    this.settlementItems.length = 0;
+  }
+
   async startSale(input: StartSaleRequest): Promise<PaymentResult> {
     assertNoSensitiveCardData(input);
     validateSaleInput(input);

@@ -250,7 +250,38 @@ button:disabled {
 .environment-popover li b { color: var(--muted); font-size: 8px; }
 .environment-caution { display: flex; align-items: flex-start; gap: 7px; margin: 0 0 10px; padding: 9px; color: #77521e; background: #fff8eb; border-radius: 8px; font-size: 8px; line-height: 1.45; }
 .environment-caution svg { flex: 0 0 auto; width: 12px; height: 12px; }
+.environment-reset { display: flex; align-items: center; gap: 7px; margin: 0 0 10px; padding: 9px; color: #365c4c; background: #eef7f3; border-radius: 8px; font-size: 8px; line-height: 1.45; }
+.environment-reset svg { flex: 0 0 auto; width: 12px; height: 12px; }
 .environment-popover > small { color: var(--muted); font-size: 7px; }
+
+.staff-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 9px;
+  border-left: 1px solid #dfe4e1;
+}
+
+.staff-pill > span { display: grid; gap: 1px; text-align: right; }
+.staff-pill strong { font-size: 9px; }
+.staff-pill small { color: var(--muted); font-size: 7px; text-transform: capitalize; }
+.staff-pill button { padding: 7px 9px; color: #5b6862; background: #fff; border: 1px solid #dce2df; border-radius: 8px; font-size: 8px; font-weight: 750; }
+
+.simulation-only-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 28px;
+  padding: 5px 16px;
+  color: #355247;
+  background: #e8f2ed;
+  border-bottom: 1px solid #d1e2d9;
+  font-size: 9px;
+}
+
+.simulation-only-banner svg { width: 12px; height: 12px; }
+.simulation-only-banner span { color: #587067; }
 
 .memory-mode-banner {
   display: flex;
@@ -266,6 +297,45 @@ button:disabled {
 }
 
 .memory-mode-banner svg { width: 13px; height: 13px; }
+
+.login-page {
+  display: grid;
+  min-height: 100dvh;
+  place-items: center;
+  padding: 24px;
+  background:
+    radial-gradient(circle at 50% 0, rgb(255 255 255 / 96%), transparent 32rem),
+    #edf1ef;
+}
+
+.login-card {
+  width: min(430px, 100%);
+  padding: 30px;
+  background: #fff;
+  border: 1px solid #d9e1dd;
+  border-radius: 18px;
+  box-shadow: 0 28px 80px rgb(17 38 28 / 13%);
+}
+
+.login-brand { display: flex; align-items: center; gap: 11px; margin-bottom: 22px; }
+.login-brand > div:last-child { display: grid; gap: 2px; }
+.login-brand strong { font-size: 15px; }
+.login-brand span { color: var(--muted); font-size: 9px; }
+.sandbox-login-badge { display: flex; align-items: center; gap: 7px; width: fit-content; padding: 6px 9px; color: #37604f; background: #eaf5ef; border-radius: 999px; font-size: 8px; font-weight: 750; text-transform: uppercase; }
+.sandbox-login-badge svg { width: 12px; height: 12px; }
+.login-heading { margin: 22px 0; }
+.login-heading h1 { font-size: 30px; }
+.login-heading > p:last-child { margin: 8px 0 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.login-submit { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 44px; color: #fff; background: var(--green); border: 1px solid var(--green); border-radius: 9px; font-size: 10px; font-weight: 800; }
+.login-submit svg { width: 14px; height: 14px; }
+.demo-credentials { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 20px; padding-top: 17px; border-top: 1px solid #e3e8e5; }
+.demo-credentials > span { grid-column: 1 / -1; color: var(--muted); font-size: 8px; font-weight: 750; text-transform: uppercase; }
+.demo-credentials button { display: grid; gap: 3px; padding: 10px; text-align: left; background: #f7f9f8; border: 1px solid #dfe5e2; border-radius: 9px; }
+.demo-credentials strong { font-size: 9px; }
+.demo-credentials small { color: var(--muted); font-size: 8px; }
+.login-runtime { display: flex; align-items: center; gap: 6px; margin: 16px 0 0; color: var(--muted); font-size: 8px; }
+.login-runtime i { width: 7px; height: 7px; background: #c5842d; border-radius: 50%; }
+.login-runtime i.ready { background: #2d9b6c; }
 
 .health-pill i {
   width: 7px;
@@ -2143,6 +2213,32 @@ h2 {
 .store-settings-form > section > h2 { margin-bottom: 16px; }
 .settings-toggles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 
+.security-management { display: grid; grid-template-columns: minmax(280px, .65fr) minmax(440px, 1.35fr); gap: 18px; }
+.sandbox-operations,
+.audit-section { min-width: 0; padding: 20px; background: #fafbfa; border: 1px solid #e0e6e3; border-radius: 13px; }
+.sandbox-operations { align-self: start; }
+.sandbox-operations h2,
+.audit-heading h2 { font-size: 17px; }
+.sandbox-operations p:last-child { margin: 8px 0 18px; color: var(--muted); font-size: 9px; line-height: 1.55; }
+.sandbox-operations button { display: flex; align-items: center; justify-content: center; gap: 7px; width: 100%; min-height: 40px; padding: 8px 11px; border-radius: 9px; font-size: 9px; font-weight: 800; }
+.sandbox-operations button svg { width: 14px; height: 14px; }
+.sandbox-operations .danger { color: #8b3e3e; background: #fff; border: 1px solid #dfbcbc; }
+.sandbox-operations .danger.armed { color: #fff; background: #9d3e3e; border-color: #9d3e3e; }
+.sandbox-operations .cancel-reset { margin-top: 7px; color: var(--muted); background: transparent; border: 0; }
+.audit-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.audit-heading button { display: flex; align-items: center; gap: 6px; padding: 7px 10px; color: #4d5c55; background: #fff; border: 1px solid #dce2df; border-radius: 8px; font-size: 8px; font-weight: 750; }
+.audit-heading button svg { width: 12px; height: 12px; }
+.audit-list { display: grid; max-height: 520px; overflow-y: auto; scrollbar-width: thin; }
+.audit-list article { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 11px 6px; border-bottom: 1px solid #e5e9e7; }
+.audit-icon { display: grid; width: 30px; height: 30px; color: var(--green); background: #eaf4ef; border-radius: 8px; place-items: center; }
+.audit-icon svg { width: 14px; height: 14px; }
+.audit-list article > div,
+.audit-list article > span:last-child { display: grid; min-width: 0; gap: 3px; }
+.audit-list article > span:last-child { justify-items: end; text-align: right; }
+.audit-list strong { font-size: 9px; text-transform: capitalize; }
+.audit-list b { font-size: 8px; }
+.audit-list small { overflow: hidden; color: var(--muted); font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }
+
 .refund-modal-heading h2 { font-size: 19px; }
 .refund-intro { margin: 16px 0 12px; color: var(--muted); font-size: 10px; line-height: 1.5; }
 .refund-intro strong { color: var(--ink); }
@@ -2194,13 +2290,14 @@ h2 {
   .orders-panel,
   .order-detail-panel { max-height: none; }
   .product-management-grid { grid-template-columns: minmax(0, 1fr); }
+  .security-management { grid-template-columns: minmax(0, 1fr); }
   .managed-products { max-height: 360px; }
   .form-grid.three { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 760px) {
   .topbar { min-height: 66px; padding: 0 15px; }
-  .brand > div:last-child span, .header-time, .register-health .reader-pill { display: none; }
+  .brand > div:last-child span, .header-time, .register-health .reader-pill, .staff-pill > span { display: none; }
   .register-layout { min-height: calc(100dvh - 66px); padding: 10px; gap: 10px; }
   .catalog-panel { padding: 19px 15px; border-radius: 13px; }
   .cart-panel { top: 76px; border-radius: 13px; }
@@ -2241,9 +2338,12 @@ h2 {
   .refund-placeholder { min-height: 34px; }
   .receipt-paper { padding: 30px 22px 24px; }
   .receipt-actions { top: 22px; right: 22px; }
-  .register-health { display: none; }
-  .topbar { grid-template-columns: auto 1fr; }
+  .register-health { display: flex; }
+  .register-health > :not(.staff-pill) { display: none; }
+  .topbar { grid-template-columns: auto 1fr auto; }
   .main-nav { justify-self: end; }
+  .nav-item { padding: 0 8px; font-size: 0; }
+  .nav-item::after { right: 8px; left: 8px; }
   .order-row { grid-template-columns: minmax(0, 1fr) auto; }
   .order-status-dot { display: none; }
   .refund-auth-fields { grid-template-columns: 1fr; gap: 0; }

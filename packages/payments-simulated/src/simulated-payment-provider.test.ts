@@ -129,6 +129,12 @@ describe("refunds, settlements, and webhooks", () => {
     expect(page1.items[0]?.kind).toBe("PAYMENT");
     expect(page2.items[0]?.kind).toBe("REFUND");
     expect(page2.items[0]?.grossAmount.minorUnits).toBe(-1_000n);
+
+    provider.resetSandbox();
+    expect((await provider.listSettlements()).items).toEqual([]);
+    await expect(provider.startSale(sale(5_000n, "refund"))).resolves.toMatchObject({
+      status: "CAPTURED"
+    });
   });
 
   it("verifies signed, non-sensitive webhook payloads", async () => {

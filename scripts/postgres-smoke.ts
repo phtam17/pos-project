@@ -21,7 +21,9 @@ const app = await buildApp({
     databaseUrl,
     simulatedWebhookSecret: "postgres-smoke-secret",
     managerApiKey: "postgres-smoke-manager",
-    corsOrigins: []
+    corsOrigins: [],
+    authEnabled: false,
+    rateLimitEnabled: false
   }
 });
 
@@ -235,6 +237,29 @@ try {
   assert.equal(qrReceipt.statusCode, 200, qrReceipt.body);
   assert.equal(qrReceipt.json<{ vietnamQr: { selectedWallet: string } }>().vietnamQr.selectedWallet, "MOMO");
 
+  const webhookPayload = {
+    id: `postgres-webhook-${randomUUID()}`,
+    type: "payment.updated",
+    occurredAt: new Date().toISOString(),
+    data: {}
+  };
+  const webhookRequest = {
+    method: "POST" as const,
+    url: "/v1/providers/simulated/webhooks",
+    headers: { "x-simulated-signature": "postgres-smoke-secret" },
+    payload: webhookPayload
+  };
+  assert.equal(
+    (await app.inject(webhookRequest)).json<{ replayed: boolean }>().replayed,
+    false,
+    "first PostgreSQL webhook delivery should be claimed"
+  );
+  assert.equal(
+    (await app.inject(webhookRequest)).json<{ replayed: boolean }>().replayed,
+    true,
+    "duplicate PostgreSQL webhook delivery should be ignored"
+  );
+
   const worker = await runWorkerOnce({
     repository,
     provider,
@@ -265,7 +290,17 @@ try {
     const restored = await app.inject({
       method: "PUT",
       url: "/v1/merchant-settings",
-      payload: originalMerchantSettings
+      payload: {
+        merchantName: originalMerchantSettings.merchantName,
+        locationName: originalMerchantSettings.locationName,
+        registerName: originalMerchantSettings.registerName,
+        currency: originalMerchantSettings.currency,
+        receiptHeader: originalMerchantSettings.receiptHeader,
+        receiptFooter: originalMerchantSettings.receiptFooter,
+        showSkuOnReceipt: originalMerchantSettings.showSkuOnReceipt,
+        discountsEnabled: originalMerchantSettings.discountsEnabled,
+        tipsEnabled: originalMerchantSettings.tipsEnabled
+      }
     });
     assert.equal(restored.statusCode, 200, restored.body);
   }

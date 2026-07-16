@@ -77,7 +77,29 @@ export interface ReconciliationSummary {
   readonly unreconciledRefundIds: readonly string[];
 }
 
+export type ProviderInboxStatus = "PROCESSING" | "PROCESSED" | "FAILED";
+
+export interface ProviderInboxEvent {
+  readonly provider: string;
+  readonly eventId: string;
+  readonly eventType: string;
+  readonly payloadHash: string;
+  readonly metadata: Readonly<Record<string, unknown>>;
+  readonly status: ProviderInboxStatus;
+  readonly attempts: number;
+  readonly receivedAt: Date;
+  readonly updatedAt: Date;
+  readonly processedAt?: Date;
+  readonly lastError?: string;
+}
+
+export interface ProviderInboxClaim {
+  readonly record: ProviderInboxEvent;
+  readonly claimed: boolean;
+}
+
 export interface PosRepository {
+  withTransaction<T>(work: () => Promise<T>): Promise<T>;
   healthCheck(): Promise<void>;
   listProducts(query?: ProductQuery): Promise<readonly Product[]>;
   getProduct(id: string): Promise<Product | undefined>;
@@ -134,6 +156,13 @@ export interface PosRepository {
 
   appendAudit(entry: AuditEntry): Promise<void>;
   listAudit(query?: AuditQuery): Promise<readonly AuditEntry[]>;
+
+  claimProviderEvent(event: ProviderInboxEvent): Promise<ProviderInboxClaim>;
+  completeProviderEvent(provider: string, eventId: string, processedAt: Date): Promise<void>;
+  failProviderEvent(event: ProviderInboxEvent, error: string, failedAt: Date): Promise<void>;
+
+  /** Removes sandbox transactions while retaining products and merchant settings. */
+  resetDemoData(): Promise<void>;
 
   enqueueOutbox(message: OutboxMessage): Promise<void>;
   listPendingOutbox(limit?: number, now?: Date): Promise<readonly OutboxMessage[]>;

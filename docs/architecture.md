@@ -37,7 +37,7 @@ Module boundaries are ordinary TypeScript packages so they remain easy to test a
 - Replays can reconstruct an operation if a process dies after its idempotency claim but before its financial reservation is committed.
 - The outbox worker atomically claims rows and records publish failures before retry.
 
-The current skeleton does **not** yet wrap every use-case aggregate change, audit entry, and outbox insert in one PostgreSQL transaction. It also verifies provider webhooks but does not yet persist a unique provider-event inbox. Both are required before a real-card production deployment.
+The current skeleton does **not** yet wrap every use-case aggregate change, audit entry, and outbox insert in one PostgreSQL transaction. Provider webhooks are verified over raw bytes and claimed through a unique transactional inbox, but a real integration must additionally enforce that provider's timestamp/replay window and event-ordering rules before production deployment.
 
 ## Offline policy
 

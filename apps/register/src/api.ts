@@ -1,7 +1,30 @@
 export type AmountMinor = string;
 export type Tender = "cash" | "card" | "vietnam_qr";
+export type StaffRole = "CASHIER" | "MANAGER";
 export type VietnamQrWallet = "VCB" | "MOMO" | "ZALOPAY" | "SHOPEEPAY_VN";
 export type SandboxQrOutcome = "APPROVED" | "DECLINED" | "EXPIRED";
+
+export interface StaffDto {
+  id: string;
+  name: string;
+  role: StaffRole;
+}
+
+export interface AuthSessionDto {
+  token: string;
+  staff: StaffDto;
+  expiresAt: string;
+}
+
+export interface AuditEntryDto {
+  id: string;
+  aggregateType: string;
+  aggregateId: string;
+  action: string;
+  actorId?: string;
+  metadata: Record<string, unknown>;
+  occurredAt: string;
+}
 
 export interface QrPresentationDto {
   type: "QR_CODE";
@@ -97,6 +120,8 @@ export interface RuntimeStatusDto {
     card: { ready: boolean; provider?: string };
     vietnamQr: { ready: boolean; provider?: string };
   };
+  auth: { enabled: boolean; publicSandbox: boolean };
+  demoReset: { enabled: boolean; automatic: boolean; nextAt?: string; lastAt?: string };
   warnings: string[];
   checkedAt: string;
 }
@@ -207,6 +232,35 @@ export interface ReceiptDto {
 }
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") ?? "";
+const SESSION_STORAGE_KEY = "open-pos.staff-session";
+
+export function getStoredSession(): AuthSessionDto | null {
+  if (typeof window === "undefined") return null;
+  const saved = window.sessionStorage.getItem(SESSION_STORAGE_KEY);
+  if (!saved) return null;
+  try {
+    const session = normalizeSession(JSON.parse(saved) as unknown);
+    const expiresAt = session ? new Date(session.expiresAt).getTime() : Number.NaN;
+    if (!session || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+      window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
+      return null;
+    }
+    return session;
+  } catch {
+    window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
+    return null;
+  }
+}
+
+export function clearStoredSession(): void {
+  if (typeof window !== "undefined") window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
+}
+
+function storeSession(session: AuthSessionDto): void {
+  if (typeof window !== "undefined") {
+    window.sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
+  }
+}
 
 export class ApiError extends Error {
   readonly status: number;
@@ -290,6 +344,8 @@ function normalizeRuntimeStatus(value: unknown): RuntimeStatusDto {
   const simulators = record(source.simulators);
   const card = record(simulators.card);
   const vietnamQr = record(simulators.vietnamQr);
+  const auth = record(source.auth);
+  const demoReset = record(source.demoReset);
   const persistenceMode = text(persistence.mode).toLowerCase() === "postgres"
     ? "postgres"
     : "memory";
@@ -317,10 +373,58 @@ function normalizeRuntimeStatus(value: unknown): RuntimeStatusDto {
         ...(vietnamQrProvider ? { provider: vietnamQrProvider } : {})
       }
     },
+    auth: {
+      enabled: auth.enabled !== false,
+      publicSandbox: auth.publicSandbox === true
+    },
+    demoReset: {
+      enabled: demoReset.enabled !== false,
+      automatic: demoReset.automatic === true,
+      ...(optionalText(demoReset.nextAt) ? { nextAt: text(demoReset.nextAt) } : {}),
+      ...(optionalText(demoReset.lastAt) ? { lastAt: text(demoReset.lastAt) } : {})
+    },
     warnings: Array.isArray(source.warnings)
       ? source.warnings.map((warning) => text(warning)).filter(Boolean)
       : [],
     checkedAt: text(source.checkedAt, new Date().toISOString())
+  };
+}
+
+function normalizeStaff(value: unknown): StaffDto | undefined {
+  const source = record(value);
+  const role = text(source.role).toUpperCase();
+  if (!optionalText(source.id) || !optionalText(source.name) || (role !== "CASHIER" && role !== "MANAGER")) {
+    return undefined;
+  }
+  return { id: text(source.id), name: text(source.name), role };
+}
+
+function normalizeSession(value: unknown): AuthSessionDto | undefined {
+  const source = record(value);
+  const staff = normalizeStaff(source.staff);
+  const token = optionalText(source.token);
+  const expiresAt = optionalText(source.expiresAt);
+  if (!staff || !token || !expiresAt) return undefined;
+  return { token, staff, expiresAt };
+}
+
+function normalizeAuditEntry(value: unknown): AuditEntryDto | undefined {
+  const source = record(value);
+  const id = optionalText(source.id);
+  const aggregateType = optionalText(source.aggregateType);
+  const aggregateId = optionalText(source.aggregateId);
+  const action = optionalText(source.action);
+  const occurredAt = optionalText(source.occurredAt);
+  if (!id || !aggregateType || !aggregateId || !action || !occurredAt) return undefined;
+  const actorId = optionalText(source.actorId);
+  return {
+    id,
+    aggregateType,
+    aggregateId,
+    action,
+    ...(actorId ? { actorId } : {}),
+    metadata: record(source.metadata),
+    occurredAt
   };
 }
 
@@ -610,6 +714,12 @@ async function request(path: string, init: RequestInit = {}): Promise<unknown> {
   const headers = new Headers(init.headers);
   headers.set("Accept", "application/json");
   if (init.body !== undefined) headers.set("Content-Type", "application/json");
+  const hadStoredSession = typeof window !== "undefined"
+    && window.sessionStorage.getItem(SESSION_STORAGE_KEY) !== null;
+  const session = getStoredSession();
+  if (session && !headers.has("Authorization")) {
+    headers.set("Authorization", `Bearer ${session.token}`);
+  }
 
   let response: Response;
   try {
@@ -630,6 +740,10 @@ async function request(path: string, init: RequestInit = {}): Promise<unknown> {
     const nestedError = record(error.error);
     const message = text(error.message ?? nestedError.message, `The request failed (${response.status}).`);
     const code = optionalText(error.code ?? nestedError.code);
+    if (response.status === 401 && code === "UNAUTHORIZED" && (session || hadStoredSession)) {
+      clearStoredSession();
+      window.dispatchEvent(new Event("open-pos:unauthorized"));
+    }
     throw new ApiError(message, response.status, code);
   }
 
@@ -639,6 +753,40 @@ async function request(path: string, init: RequestInit = {}): Promise<unknown> {
 export const api = {
   async getRuntimeStatus(): Promise<RuntimeStatusDto> {
     return normalizeRuntimeStatus(await request("/v1/runtime-status"));
+  },
+
+  async login(staffId: string, pin: string): Promise<AuthSessionDto> {
+    const session = normalizeSession(await request("/v1/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ staffId, pin })
+    }));
+    if (!session) throw new ApiError("The login response was invalid.", 502, "INVALID_RESPONSE");
+    storeSession(session);
+    return session;
+  },
+
+  logout(): void {
+    clearStoredSession();
+  },
+
+  async createManagerApproval(input: {
+    managerId: string;
+    managerPin: string;
+    paymentId: string;
+    amountMinor: AmountMinor;
+    idempotencyKey: string;
+  }): Promise<{ approvalToken: string; approvedBy: string; expiresAt: string }> {
+    const source = record(await request("/v1/auth/manager-approvals", {
+      method: "POST",
+      body: JSON.stringify(input)
+    }));
+    const approvalToken = optionalText(source.approvalToken);
+    const approvedBy = optionalText(source.approvedBy);
+    const expiresAt = optionalText(source.expiresAt);
+    if (!approvalToken || !approvedBy || !expiresAt) {
+      throw new ApiError("The manager approval response was invalid.", 502, "INVALID_RESPONSE");
+    }
+    return { approvalToken, approvedBy, expiresAt };
   },
 
   async listProducts(options: { includeInactive?: boolean } = {}): Promise<ProductDto[]> {
@@ -789,19 +937,32 @@ export const api = {
     paymentId: string,
     amountMinor: AmountMinor,
     reason: string,
-    managerId: string,
-    managerKey: string,
+    approvalToken: string,
     idempotencyKey: string
   ): Promise<RefundDto> {
     return normalizeRefund(await request(`/v1/payments/${encodeURIComponent(paymentId)}/refunds`, {
       method: "POST",
       headers: {
         "Idempotency-Key": idempotencyKey,
-        "X-Manager-Id": managerId,
-        "X-Manager-Key": managerKey
+        "X-Manager-Approval": approvalToken
       },
       body: JSON.stringify({ amountMinor, reason })
     }));
+  },
+
+  async listAudit(limit = 100): Promise<AuditEntryDto[]> {
+    const body = await request(`/v1/audit?limit=${encodeURIComponent(String(limit))}`);
+    const entries = envelope(body, ["entries"]);
+    return Array.isArray(entries)
+      ? entries.map(normalizeAuditEntry).filter((entry): entry is AuditEntryDto => entry !== undefined)
+      : [];
+  },
+
+  async resetSandbox(): Promise<{ resetAt: string; nextAutomaticResetAt?: string }> {
+    const source = record(await request("/v1/sandbox/reset", { method: "POST" }));
+    const resetAt = text(source.resetAt, new Date().toISOString());
+    const nextAutomaticResetAt = optionalText(source.nextAutomaticResetAt);
+    return { resetAt, ...(nextAutomaticResetAt ? { nextAutomaticResetAt } : {}) };
   }
 };
 

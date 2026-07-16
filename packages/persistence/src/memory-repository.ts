@@ -22,6 +22,8 @@ import type {
   IdempotencyRecord,
   OrderQuery,
   PosRepository,
+  ProviderInboxClaim,
+  ProviderInboxEvent,
   ProductQuery,
   ReconciliationQuery,
   ReconciliationSummary
@@ -68,6 +70,31 @@ function cloneIdempotency(record: IdempotencyRecord): IdempotencyRecord {
     updatedAt: new Date(record.updatedAt),
     expiresAt: new Date(record.expiresAt)
   });
+}
+
+function cloneProviderInbox(record: ProviderInboxEvent): ProviderInboxEvent {
+  return Object.freeze({
+    provider: record.provider,
+    eventId: record.eventId,
+    eventType: record.eventType,
+    payloadHash: record.payloadHash,
+    metadata: structuredClone(record.metadata),
+    status: record.status,
+    attempts: record.attempts,
+    receivedAt: new Date(record.receivedAt),
+    updatedAt: new Date(record.updatedAt),
+    ...(record.processedAt ? { processedAt: new Date(record.processedAt) } : {}),
+    ...(record.lastError ? { lastError: record.lastError } : {})
+  });
+}
+
+function cloneMap<K, V>(source: ReadonlyMap<K, V>, clone: (value: V) => V): Map<K, V> {
+  return new Map([...source].map(([key, value]) => [key, clone(value)]));
+}
+
+function restoreMap<K, V>(target: Map<K, V>, snapshot: ReadonlyMap<K, V>): void {
+  target.clear();
+  for (const [key, value] of snapshot) target.set(key, value);
 }
 
 function readSnapshot(value: unknown): Record<string, unknown> {
@@ -141,6 +168,53 @@ export class MemoryPosRepository implements PosRepository {
   private readonly publishedOutbox = new Map<string, Date>();
   private readonly outboxLocks = new Map<string, Date>();
   private readonly settlementBatches = new Map<string, SettlementBatch>();
+  private readonly providerInbox = new Map<string, ProviderInboxEvent>();
+  private transactionTail: Promise<void> = Promise.resolve();
+
+  async withTransaction<T>(work: () => Promise<T>): Promise<T> {
+    let release!: () => void;
+    const prior = this.transactionTail;
+    const turn = new Promise<void>((resolve) => { release = resolve; });
+    this.transactionTail = prior.then(() => turn);
+    await prior;
+    const snapshot = {
+      products: cloneMap(this.products, cloneAggregate),
+      merchantSettings: cloneAggregate(this.merchantSettings),
+      carts: cloneMap(this.carts, cloneAggregate),
+      orders: cloneMap(this.orders, cloneAggregate),
+      paymentAttempts: cloneMap(this.paymentAttempts, cloneAggregate),
+      payments: cloneMap(this.payments, cloneAggregate),
+      refunds: cloneMap(this.refunds, cloneAggregate),
+      idempotency: cloneMap(this.idempotency, cloneIdempotency),
+      auditEntries: cloneMap(this.auditEntries, cloneAggregate),
+      outboxMessages: cloneMap(this.outboxMessages, cloneAggregate),
+      publishedOutbox: cloneMap(this.publishedOutbox, (value) => new Date(value)),
+      outboxLocks: cloneMap(this.outboxLocks, (value) => new Date(value)),
+      settlementBatches: cloneMap(this.settlementBatches, cloneAggregate),
+      providerInbox: cloneMap(this.providerInbox, cloneProviderInbox)
+    };
+    try {
+      return await work();
+    } catch (error) {
+      restoreMap(this.products, snapshot.products);
+      this.merchantSettings = snapshot.merchantSettings;
+      restoreMap(this.carts, snapshot.carts);
+      restoreMap(this.orders, snapshot.orders);
+      restoreMap(this.paymentAttempts, snapshot.paymentAttempts);
+      restoreMap(this.payments, snapshot.payments);
+      restoreMap(this.refunds, snapshot.refunds);
+      restoreMap(this.idempotency, snapshot.idempotency);
+      restoreMap(this.auditEntries, snapshot.auditEntries);
+      restoreMap(this.outboxMessages, snapshot.outboxMessages);
+      restoreMap(this.publishedOutbox, snapshot.publishedOutbox);
+      restoreMap(this.outboxLocks, snapshot.outboxLocks);
+      restoreMap(this.settlementBatches, snapshot.settlementBatches);
+      restoreMap(this.providerInbox, snapshot.providerInbox);
+      throw error;
+    } finally {
+      release();
+    }
+  }
 
   async healthCheck(): Promise<void> {}
 
@@ -577,6 +651,67 @@ export class MemoryPosRepository implements PosRepository {
       .sort((left, right) => aggregateSortDate(right) - aggregateSortDate(left))
       .slice(0, Math.max(0, query.limit ?? 100))
       .map(cloneAggregate);
+  }
+
+  async claimProviderEvent(event: ProviderInboxEvent): Promise<ProviderInboxClaim> {
+    const key = `${event.provider}\0${event.eventId}`;
+    const existing = this.providerInbox.get(key);
+    if (existing && existing.payloadHash !== event.payloadHash) {
+      throw new RepositoryConflictError("ProviderInboxEvent payload", `${event.provider}:${event.eventId}`);
+    }
+    if (existing && existing.status !== "FAILED") {
+      return { record: cloneProviderInbox(existing), claimed: false };
+    }
+    const claimed = cloneProviderInbox({
+      ...event,
+      status: "PROCESSING",
+      attempts: (existing?.attempts ?? 0) + 1,
+      updatedAt: new Date(event.updatedAt)
+    });
+    this.providerInbox.set(key, claimed);
+    return { record: cloneProviderInbox(claimed), claimed: true };
+  }
+
+  async completeProviderEvent(provider: string, eventId: string, processedAt: Date): Promise<void> {
+    const key = `${provider}\0${eventId}`;
+    const existing = this.providerInbox.get(key);
+    if (!existing) throw new RepositoryNotFoundError("ProviderInboxEvent", key);
+    const { lastError: _lastError, ...withoutError } = existing;
+    this.providerInbox.set(key, cloneProviderInbox({
+      ...withoutError,
+      status: "PROCESSED",
+      processedAt,
+      updatedAt: processedAt
+    }));
+  }
+
+  async failProviderEvent(event: ProviderInboxEvent, error: string, failedAt: Date): Promise<void> {
+    const key = `${event.provider}\0${event.eventId}`;
+    const existing = this.providerInbox.get(key);
+    if (existing && (existing.status !== "FAILED" || existing.payloadHash !== event.payloadHash)) return;
+    const { processedAt: _processedAt, ...withoutProcessedAt } = event;
+    this.providerInbox.set(key, cloneProviderInbox({
+      ...withoutProcessedAt,
+      status: "FAILED",
+      attempts: Math.max(1, existing?.attempts ?? event.attempts),
+      updatedAt: failedAt,
+      lastError: error
+    }));
+  }
+
+  async resetDemoData(): Promise<void> {
+    this.carts.clear();
+    this.orders.clear();
+    this.paymentAttempts.clear();
+    this.payments.clear();
+    this.refunds.clear();
+    this.idempotency.clear();
+    this.auditEntries.clear();
+    this.outboxMessages.clear();
+    this.publishedOutbox.clear();
+    this.outboxLocks.clear();
+    this.settlementBatches.clear();
+    this.providerInbox.clear();
   }
 
   async enqueueOutbox(message: OutboxMessage): Promise<void> {

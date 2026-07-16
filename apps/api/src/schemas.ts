@@ -1,6 +1,20 @@
 import { z } from "zod";
 
 export const identifierSchema = z.string().trim().min(1).max(128);
+export const idempotencyKeySchema = z.string().trim().min(8).max(255);
+
+export const staffLoginSchema = z.object({
+  staffId: identifierSchema,
+  pin: z.string().min(4).max(128)
+}).strict();
+
+export const managerApprovalSchema = z.object({
+  managerId: identifierSchema,
+  managerPin: z.string().min(4).max(128),
+  paymentId: identifierSchema,
+  amountMinor: z.string().regex(/^\d+$/).refine((value) => BigInt(value) > 0n),
+  idempotencyKey: idempotencyKeySchema
+}).strict();
 
 export const createProductSchema = z.object({
   sku: z.string().trim().min(1).max(64),
@@ -64,5 +78,3 @@ export const refundSchema = z.object({
   amountMinor: z.string().regex(/^\d+$/),
   reason: z.string().trim().min(1).max(500)
 }).strict();
-
-export const idempotencyKeySchema = z.string().trim().min(8).max(255);
