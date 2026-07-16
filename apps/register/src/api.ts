@@ -9,6 +9,42 @@ export interface QrPresentationDto {
   expiresAt: string;
   supportedWallets: VietnamQrWallet[];
   sandbox: boolean;
+  quote: VietnamQrQuoteDto;
+}
+
+export interface VietnamQrQuoteDto {
+  payerCurrency: "VND";
+  payerAmountMinor: AmountMinor;
+  exchangeRate: string;
+  settlementFeeBps: number;
+  settlementFeeMinor: AmountMinor;
+  merchantNetMinor: AmountMinor;
+  expiresAt: string;
+}
+
+export type PaymentTimelineEventType =
+  | "QR_CREATED"
+  | "CUSTOMER_OPENED"
+  | "CUSTOMER_APPROVED"
+  | "PROVIDER_CONFIRMED"
+  | "SETTLED"
+  | "REFUNDED"
+  | "CALLBACK_SCHEDULED"
+  | "DUPLICATE_CALLBACK_IGNORED"
+  | "DECLINED"
+  | "EXPIRED";
+
+export interface PaymentTimelineEventDto {
+  id: string;
+  type: PaymentTimelineEventType;
+  description: string;
+  occurredAt: string;
+}
+
+export interface VietnamQrDetailsDto {
+  quote: VietnamQrQuoteDto;
+  selectedWallet?: VietnamQrWallet;
+  timeline: PaymentTimelineEventDto[];
 }
 
 export interface ProductDto {
@@ -69,6 +105,10 @@ export interface PaymentAttemptDto {
   payerAmountMinor?: AmountMinor;
   payerCurrency?: string;
   exchangeRate?: string;
+  settlementFeeBps?: number;
+  settlementFeeMinor?: AmountMinor;
+  merchantNetMinor?: AmountMinor;
+  vietnamQr?: VietnamQrDetailsDto;
   createdAt?: string;
 }
 
@@ -106,6 +146,7 @@ export interface ReceiptDto {
   cardBrand?: string;
   last4?: string;
   wallet?: VietnamQrWallet;
+  vietnamQr?: VietnamQrDetailsDto;
   refundStatus: "NONE" | "PENDING" | "PARTIAL" | "FULL";
   refundedMinor: AmountMinor;
   remainingMinor: AmountMinor;
@@ -286,7 +327,10 @@ function normalizePayment(value: unknown): PaymentAttemptDto {
   const tenderValue = text(source.tender, "card").toLowerCase();
   const presentation = record(source.presentation);
   const walletDetails = record(source.wallet);
-  const walletValue = optionalText(walletDetails.wallet ?? source.wallet)?.toUpperCase();
+  const vietnamQr = normalizeVietnamQr(source.vietnamQr, presentation.quote);
+  const walletValue = optionalText(
+    walletDetails.wallet ?? vietnamQr?.selectedWallet ?? source.wallet
+  )?.toUpperCase();
   const supportedWallets = Array.isArray(presentation.supportedWallets)
     ? presentation.supportedWallets
         .map((wallet) => text(wallet).toUpperCase())
@@ -312,21 +356,80 @@ function normalizePayment(value: unknown): PaymentAttemptDto {
             payload: presentationPayload,
             expiresAt: presentationExpiresAt,
             supportedWallets,
-            sandbox: presentation.sandbox === true
+            sandbox: presentation.sandbox === true,
+            quote: vietnamQr?.quote ?? normalizeVietnamQrQuote(presentation.quote, presentationExpiresAt)
           }
         }
       : {}),
     ...(walletValue && isVietnamQrWallet(walletValue) ? { wallet: walletValue } : {}),
     ...(optionalText(walletDetails.payerAmountMinor)
       ? { payerAmountMinor: amount(walletDetails.payerAmountMinor) }
-      : {}),
+      : vietnamQr ? { payerAmountMinor: vietnamQr.quote.payerAmountMinor } : {}),
     ...(optionalText(walletDetails.payerCurrency)
       ? { payerCurrency: text(walletDetails.payerCurrency).toUpperCase() }
-      : {}),
+      : vietnamQr ? { payerCurrency: vietnamQr.quote.payerCurrency } : {}),
     ...(optionalText(walletDetails.exchangeRate)
       ? { exchangeRate: text(walletDetails.exchangeRate) }
-      : {}),
+      : vietnamQr ? { exchangeRate: vietnamQr.quote.exchangeRate } : {}),
+    ...(Number.isSafeInteger(walletDetails.settlementFeeBps)
+      ? { settlementFeeBps: numeric(walletDetails.settlementFeeBps) }
+      : vietnamQr ? { settlementFeeBps: vietnamQr.quote.settlementFeeBps } : {}),
+    ...(optionalText(walletDetails.settlementFeeMinor)
+      ? { settlementFeeMinor: amount(walletDetails.settlementFeeMinor) }
+      : vietnamQr ? { settlementFeeMinor: vietnamQr.quote.settlementFeeMinor } : {}),
+    ...(optionalText(walletDetails.merchantNetMinor)
+      ? { merchantNetMinor: amount(walletDetails.merchantNetMinor) }
+      : vietnamQr ? { merchantNetMinor: vietnamQr.quote.merchantNetMinor } : {}),
+    ...(vietnamQr ? { vietnamQr } : {}),
     ...(optionalCreatedAt ? { createdAt: optionalCreatedAt } : {})
+  };
+}
+
+function normalizeVietnamQr(
+  value: unknown,
+  presentationQuote?: unknown
+): VietnamQrDetailsDto | undefined {
+  const source = record(value);
+  const quoteSource = Object.keys(record(source.quote)).length > 0
+    ? source.quote
+    : presentationQuote;
+  const expiresAt = optionalText(record(quoteSource).expiresAt);
+  if (!expiresAt) return undefined;
+  const selectedWalletValue = optionalText(source.selectedWallet)?.toUpperCase();
+  const timeline = Array.isArray(source.timeline)
+    ? source.timeline.map(normalizeTimelineEvent).filter((event): event is PaymentTimelineEventDto => event !== undefined)
+    : [];
+  return {
+    quote: normalizeVietnamQrQuote(quoteSource, expiresAt),
+    ...(selectedWalletValue && isVietnamQrWallet(selectedWalletValue)
+      ? { selectedWallet: selectedWalletValue }
+      : {}),
+    timeline
+  };
+}
+
+function normalizeVietnamQrQuote(value: unknown, fallbackExpiresAt: string): VietnamQrQuoteDto {
+  const source = record(value);
+  return {
+    payerCurrency: "VND",
+    payerAmountMinor: amount(source.payerAmountMinor),
+    exchangeRate: text(source.exchangeRate, "25500"),
+    settlementFeeBps: numeric(source.settlementFeeBps, 250),
+    settlementFeeMinor: amount(source.settlementFeeMinor),
+    merchantNetMinor: amount(source.merchantNetMinor),
+    expiresAt: text(source.expiresAt, fallbackExpiresAt)
+  };
+}
+
+function normalizeTimelineEvent(value: unknown): PaymentTimelineEventDto | undefined {
+  const source = record(value);
+  const typeValue = text(source.type).toUpperCase();
+  if (!isPaymentTimelineEventType(typeValue)) return undefined;
+  return {
+    id: text(source.id),
+    type: typeValue,
+    description: text(source.description, typeValue),
+    occurredAt: text(source.occurredAt, new Date().toISOString())
   };
 }
 
@@ -338,7 +441,10 @@ function normalizeReceipt(value: unknown): ReceiptDto {
   const optionalPaymentStatus = optionalText(source.paymentStatus ?? payment.status);
   const optionalBrand = optionalText(source.cardBrand ?? payment.cardBrand);
   const optionalLast4 = optionalText(source.last4 ?? payment.last4);
-  const optionalWallet = optionalText(source.wallet ?? record(payment.wallet).wallet)?.toUpperCase();
+  const vietnamQr = normalizeVietnamQr(source.vietnamQr ?? payment.vietnamQr);
+  const optionalWallet = optionalText(
+    source.wallet ?? record(payment.wallet).wallet ?? vietnamQr?.selectedWallet
+  )?.toUpperCase();
   const refundStatusValue = text(source.refundStatus, "NONE").toUpperCase();
   const refundStatus = refundStatusValue === "PENDING" || refundStatusValue === "PARTIAL" || refundStatusValue === "FULL"
     ? refundStatusValue
@@ -361,6 +467,7 @@ function normalizeReceipt(value: unknown): ReceiptDto {
     ...(optionalBrand ? { cardBrand: optionalBrand } : {}),
     ...(optionalLast4 ? { last4: optionalLast4 } : {}),
     ...(optionalWallet && isVietnamQrWallet(optionalWallet) ? { wallet: optionalWallet } : {}),
+    ...(vietnamQr ? { vietnamQr } : {}),
     refundStatus,
     refundedMinor: amount(source.refundedMinor),
     remainingMinor: amount(source.remainingMinor, order.totalMinor),
@@ -473,12 +580,27 @@ export const api = {
   async completeSandboxVietnamQr(
     attemptId: string,
     wallet: VietnamQrWallet,
-    outcome: SandboxQrOutcome
+    outcome: SandboxQrOutcome,
+    options: { delayMs?: number; duplicate?: boolean } = {}
   ): Promise<PaymentAttemptDto> {
     return normalizePayment(await request(`/v1/sandbox/vietnam-qr/${encodeURIComponent(attemptId)}/complete`, {
       method: "POST",
-      body: JSON.stringify({ wallet, outcome })
+      body: JSON.stringify({ wallet, outcome, ...options })
     }));
+  },
+
+  async scanSandboxVietnamQr(
+    attemptId: string,
+    wallet: VietnamQrWallet
+  ): Promise<PaymentAttemptDto> {
+    return normalizePayment(await request(`/v1/sandbox/vietnam-qr/${encodeURIComponent(attemptId)}/scan`, {
+      method: "POST",
+      body: JSON.stringify({ wallet })
+    }));
+  },
+
+  async getPaymentAttempt(attemptId: string): Promise<PaymentAttemptDto> {
+    return normalizePayment(await request(`/v1/payment-attempts/${encodeURIComponent(attemptId)}?refresh=true`));
   },
 
   async getReceipt(orderId: string): Promise<ReceiptDto> {
@@ -507,4 +629,17 @@ export const api = {
 
 function isVietnamQrWallet(value: string): value is VietnamQrWallet {
   return value === "VCB" || value === "MOMO" || value === "ZALOPAY" || value === "SHOPEEPAY_VN";
+}
+
+function isPaymentTimelineEventType(value: string): value is PaymentTimelineEventType {
+  return value === "QR_CREATED"
+    || value === "CUSTOMER_OPENED"
+    || value === "CUSTOMER_APPROVED"
+    || value === "PROVIDER_CONFIRMED"
+    || value === "SETTLED"
+    || value === "REFUNDED"
+    || value === "CALLBACK_SCHEDULED"
+    || value === "DUPLICATE_CALLBACK_IGNORED"
+    || value === "DECLINED"
+    || value === "EXPIRED";
 }

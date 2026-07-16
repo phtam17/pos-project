@@ -569,7 +569,10 @@ export class PosService {
         if (refund.version > 0) await this.repository.saveRefund(refund, 0);
         await this.completeIdempotency(scope, command.idempotencyKey, requestHash, refund.id);
       }
-      if (refund.status === "SUCCEEDED") await this.repairOrderAfterRefund(payment);
+      if (refund.status === "SUCCEEDED") {
+        await this.repairOrderAfterRefund(payment);
+        await this.recordVietnamQrRefundTimeline(payment, refund);
+      }
       return { refund, replayed: true };
     }
 
@@ -628,6 +631,9 @@ export class PosService {
       if (!replay) {
         throw new ApplicationError("Refund is still being committed", "IDEMPOTENCY_IN_PROGRESS", 409);
       }
+      if (replay.status === "SUCCEEDED") {
+        await this.recordVietnamQrRefundTimeline(payment, replay);
+      }
       return { refund: replay, replayed: true };
     }
     try {
@@ -666,7 +672,10 @@ export class PosService {
       reason: command.reason
     }, command.actorId ?? null);
 
-    if (refund.status === "SUCCEEDED") await this.repairOrderAfterRefund(payment);
+    if (refund.status === "SUCCEEDED") {
+      await this.repairOrderAfterRefund(payment);
+      await this.recordVietnamQrRefundTimeline(payment, refund);
+    }
     return { refund, replayed: false };
   }
 
@@ -954,18 +963,24 @@ export class PosService {
   ): Promise<PaymentAttempt> {
     let current = initial;
     for (let retry = 0; retry < 4; retry += 1) {
-      if (current.status === result.status) return current;
       if (result.processedAt.getTime() < current.updatedAt.getTime()) return current;
       if (TERMINAL_STATUSES.has(current.status) && result.status !== "CAPTURED") {
         return current;
       }
 
       const expectedVersion = current.version;
-      current.transitionTo(result.status, {
-        ...(result.providerReference ? { providerReference: result.providerReference } : {}),
-        failureCode: result.failureCode,
-        at: result.processedAt
-      });
+      const qrChanged = result.vietnamQr
+        ? current.updateVietnamQr(result.vietnamQr, result.processedAt)
+        : false;
+      if (current.status !== result.status) {
+        current.transitionTo(result.status, {
+          ...(result.providerReference ? { providerReference: result.providerReference } : {}),
+          failureCode: result.failureCode,
+          at: result.processedAt
+        });
+      } else if (!qrChanged) {
+        return current;
+      }
       try {
         return await this.repository.savePaymentAttempt(current, expectedVersion);
       } catch (error) {
@@ -1096,6 +1111,36 @@ export class PosService {
       order.markRefunded(total, this.now());
       await this.repository.saveOrder(order, expectedVersion);
     }
+  }
+
+  private async recordVietnamQrRefundTimeline(
+    payment: Payment,
+    refund: Refund,
+  ): Promise<void> {
+    if (!payment.provider.includes("vietnam-qr")) return;
+    for (let retry = 0; retry < 4; retry += 1) {
+      const attempt = await this.repository.getPaymentAttempt(payment.paymentAttemptId);
+      if (!attempt?.vietnamQr) return;
+      const expectedVersion = attempt.version;
+      const appended = attempt.appendVietnamQrTimelineEvent({
+        id: `refund:${refund.id}`,
+        type: "REFUNDED",
+        description: `Refunded ${refund.amount.minorUnits.toString()} ${refund.amount.currency} minor units`,
+        occurredAt: refund.updatedAt,
+      });
+      if (!appended) return;
+      try {
+        await this.repository.savePaymentAttempt(attempt, expectedVersion);
+        return;
+      } catch (error) {
+        if (!(error instanceof RepositoryConflictError)) throw error;
+      }
+    }
+    throw new ApplicationError(
+      "Vietnam QR timeline changed too many times",
+      "PAYMENT_STATE_CONFLICT",
+      409,
+    );
   }
 
   private async record(

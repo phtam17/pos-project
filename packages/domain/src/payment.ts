@@ -37,6 +37,45 @@ export interface CardSummary {
   readonly entryMethod: CardEntryMethod;
 }
 
+export type VietnamQrWallet = "VCB" | "MOMO" | "ZALOPAY" | "SHOPEEPAY_VN";
+
+export type PaymentTimelineEventType =
+  | "QR_CREATED"
+  | "CUSTOMER_OPENED"
+  | "CUSTOMER_APPROVED"
+  | "PROVIDER_CONFIRMED"
+  | "SETTLED"
+  | "REFUNDED"
+  | "CALLBACK_SCHEDULED"
+  | "DUPLICATE_CALLBACK_IGNORED"
+  | "DECLINED"
+  | "EXPIRED";
+
+export interface PaymentTimelineEventSnapshot {
+  readonly id: string;
+  readonly type: PaymentTimelineEventType;
+  readonly description: string;
+  readonly occurredAt: Date;
+}
+
+export interface VietnamQrQuoteSnapshot {
+  readonly payerCurrency: "VND";
+  /** VND has no fractional minor unit in this sandbox, so this is the displayed VND amount. */
+  readonly payerAmountMinor: string;
+  /** Illustrative VND received per one unit of merchant currency. */
+  readonly exchangeRate: string;
+  readonly settlementFeeBps: number;
+  readonly settlementFeeMinor: string;
+  readonly merchantNetMinor: string;
+  readonly expiresAt: Date;
+}
+
+export interface VietnamQrDetailsSnapshot {
+  readonly quote: VietnamQrQuoteSnapshot;
+  readonly selectedWallet: VietnamQrWallet | null;
+  readonly timeline: readonly PaymentTimelineEventSnapshot[];
+}
+
 export interface PaymentAttemptSnapshot {
   readonly id: PaymentAttemptId;
   readonly orderId: OrderId;
@@ -47,6 +86,7 @@ export interface PaymentAttemptSnapshot {
   readonly terminalId: TerminalId;
   readonly idempotencyKey: string;
   readonly failureCode: string | null;
+  readonly vietnamQr?: VietnamQrDetailsSnapshot | null;
   readonly createdAt: Date;
   readonly updatedAt: Date;
   readonly version: number;
@@ -94,6 +134,7 @@ export class PaymentAttempt {
   private providerReferenceValue: string | null;
   private statusValue: PaymentAttemptStatus;
   private failureCodeValue: string | null;
+  private vietnamQrValue: VietnamQrDetailsSnapshot | null;
   private updatedAtValue: Date;
   private versionValue: number;
 
@@ -122,6 +163,9 @@ export class PaymentAttempt {
       snapshot.failureCode,
       "paymentAttempt.failureCode",
     );
+    this.vietnamQrValue = snapshot.vietnamQr
+      ? normalizeVietnamQrDetails(snapshot.vietnamQr)
+      : null;
     this.createdAt = copyDate(snapshot.createdAt, "paymentAttempt.createdAt");
     this.updatedAtValue = copyDate(snapshot.updatedAt, "paymentAttempt.updatedAt");
     if (this.updatedAtValue.getTime() < this.createdAt.getTime()) {
@@ -154,6 +198,7 @@ export class PaymentAttempt {
       terminalId: input.terminalId,
       idempotencyKey: input.idempotencyKey,
       failureCode: null,
+      vietnamQr: null,
       createdAt,
       updatedAt: createdAt,
       version: 0,
@@ -174,6 +219,10 @@ export class PaymentAttempt {
 
   get failureCode(): string | null {
     return this.failureCodeValue;
+  }
+
+  get vietnamQr(): VietnamQrDetailsSnapshot | null {
+    return this.vietnamQrValue === null ? null : copyVietnamQrDetails(this.vietnamQrValue);
   }
 
   get updatedAt(): Date {
@@ -225,6 +274,41 @@ export class PaymentAttempt {
     this.versionValue += 1;
   }
 
+  updateVietnamQr(
+    details: VietnamQrDetailsSnapshot,
+    at: Date = new Date(),
+  ): boolean {
+    const normalized = normalizeVietnamQrDetails(details);
+    if (sameVietnamQrDetails(this.vietnamQrValue, normalized)) return false;
+    const timestamp = copyDate(at, "paymentAttempt.updatedAt");
+    if (timestamp.getTime() < this.updatedAtValue.getTime()) {
+      throw new DomainValidationError(
+        "paymentAttempt.updatedAt cannot move backwards",
+        "INVALID_PAYMENT_TIMESTAMP",
+      );
+    }
+    this.vietnamQrValue = normalized;
+    this.updatedAtValue = timestamp;
+    this.versionValue += 1;
+    return true;
+  }
+
+  appendVietnamQrTimelineEvent(event: PaymentTimelineEventSnapshot): boolean {
+    if (this.vietnamQrValue === null) return false;
+    const normalizedEvent = normalizeTimelineEvent(event);
+    if (this.vietnamQrValue.timeline.some((candidate) => candidate.id === normalizedEvent.id)) {
+      return false;
+    }
+    const at = new Date(Math.max(
+      this.updatedAtValue.getTime(),
+      normalizedEvent.occurredAt.getTime(),
+    ));
+    return this.updateVietnamQr({
+      ...this.vietnamQrValue,
+      timeline: [...this.vietnamQrValue.timeline, normalizedEvent],
+    }, at);
+  }
+
   toSnapshot(): PaymentAttemptSnapshot {
     return Object.freeze({
       id: this.id,
@@ -236,6 +320,7 @@ export class PaymentAttempt {
       terminalId: this.terminalId,
       idempotencyKey: this.idempotencyKey,
       failureCode: this.failureCode,
+      vietnamQr: this.vietnamQr,
       createdAt: new Date(this.createdAt.getTime()),
       updatedAt: this.updatedAt,
       version: this.version,
@@ -487,4 +572,89 @@ function copyCardSummary(card: CardSummary): CardSummary {
 
 function normalizeNullableString(value: string | null, field: string): string | null {
   return value === null ? null : requireNonEmpty(value, field);
+}
+
+function normalizeVietnamQrDetails(
+  value: VietnamQrDetailsSnapshot,
+): VietnamQrDetailsSnapshot {
+  const quote = value.quote;
+  const payerAmountMinor = requireDigits(quote.payerAmountMinor, "vietnamQr.payerAmountMinor");
+  const exchangeRate = requireDigits(quote.exchangeRate, "vietnamQr.exchangeRate");
+  const settlementFeeMinor = requireDigits(
+    quote.settlementFeeMinor,
+    "vietnamQr.settlementFeeMinor",
+  );
+  const merchantNetMinor = requireDigits(quote.merchantNetMinor, "vietnamQr.merchantNetMinor");
+  if (!Number.isSafeInteger(quote.settlementFeeBps) || quote.settlementFeeBps < 0) {
+    throw new DomainValidationError(
+      "vietnamQr.settlementFeeBps must be a non-negative safe integer",
+      "INVALID_VIETNAM_QR_QUOTE",
+    );
+  }
+  const selectedWallet = value.selectedWallet;
+  if (selectedWallet !== null && !isVietnamQrWallet(selectedWallet)) {
+    throw new DomainValidationError(
+      "vietnamQr.selectedWallet is unsupported",
+      "INVALID_VIETNAM_QR_WALLET",
+    );
+  }
+  return Object.freeze({
+    quote: Object.freeze({
+      payerCurrency: "VND",
+      payerAmountMinor,
+      exchangeRate,
+      settlementFeeBps: quote.settlementFeeBps,
+      settlementFeeMinor,
+      merchantNetMinor,
+      expiresAt: copyDate(quote.expiresAt, "vietnamQr.expiresAt"),
+    }),
+    selectedWallet,
+    timeline: Object.freeze(value.timeline.map(normalizeTimelineEvent)),
+  });
+}
+
+function normalizeTimelineEvent(
+  event: PaymentTimelineEventSnapshot,
+): PaymentTimelineEventSnapshot {
+  return Object.freeze({
+    id: requireNonEmpty(event.id, "paymentTimelineEvent.id"),
+    type: event.type,
+    description: requireNonEmpty(event.description, "paymentTimelineEvent.description"),
+    occurredAt: copyDate(event.occurredAt, "paymentTimelineEvent.occurredAt"),
+  });
+}
+
+function copyVietnamQrDetails(value: VietnamQrDetailsSnapshot): VietnamQrDetailsSnapshot {
+  return normalizeVietnamQrDetails(value);
+}
+
+function sameVietnamQrDetails(
+  left: VietnamQrDetailsSnapshot | null,
+  right: VietnamQrDetailsSnapshot,
+): boolean {
+  if (left === null) return false;
+  return JSON.stringify(vietnamQrComparable(left)) === JSON.stringify(vietnamQrComparable(right));
+}
+
+function vietnamQrComparable(value: VietnamQrDetailsSnapshot): unknown {
+  return {
+    quote: { ...value.quote, expiresAt: value.quote.expiresAt.toISOString() },
+    selectedWallet: value.selectedWallet,
+    timeline: value.timeline.map((event) => ({
+      ...event,
+      occurredAt: event.occurredAt.toISOString(),
+    })),
+  };
+}
+
+function requireDigits(value: string, field: string): string {
+  const normalized = requireNonEmpty(value, field);
+  if (!/^\d+$/.test(normalized)) {
+    throw new DomainValidationError(`${field} must contain digits`, "INVALID_VIETNAM_QR_QUOTE");
+  }
+  return normalized;
+}
+
+function isVietnamQrWallet(value: string): value is VietnamQrWallet {
+  return value === "VCB" || value === "MOMO" || value === "ZALOPAY" || value === "SHOPEEPAY_VN";
 }

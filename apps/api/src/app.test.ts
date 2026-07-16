@@ -137,7 +137,11 @@ describe("POS API vertical slice", () => {
   });
 
   it("runs a complete Vietnam QR sandbox checkout", async () => {
-    const instance = await app();
+    const instance = await buildApp({
+      config: { ...config, managerApiKey: "manager-test-key" },
+      logger: false
+    });
+    openApps.push(instance);
     const productId = (await instance.inject({ method: "GET", url: "/v1/products" }))
       .json<{ products: Array<{ id: string }> }>().products[0]!.id;
     const cartId = (await instance.inject({ method: "POST", url: "/v1/carts", payload: {} }))
@@ -164,29 +168,96 @@ describe("POS API vertical slice", () => {
       id: string;
       status: string;
       tender: string;
-      presentation: { sandbox: boolean; supportedWallets: string[] };
+      presentation: {
+        sandbox: boolean;
+        supportedWallets: string[];
+        quote: { exchangeRate: string; settlementFeeBps: number; payerAmountMinor: string };
+      };
+      vietnamQr: { timeline: Array<{ type: string }> };
     }>();
     expect(attempt).toMatchObject({
       status: "PROCESSING",
       tender: "vietnam_qr",
       presentation: {
         sandbox: true,
-        supportedWallets: ["VCB", "MOMO", "ZALOPAY", "SHOPEEPAY_VN"]
-      }
+        supportedWallets: ["VCB", "MOMO", "ZALOPAY", "SHOPEEPAY_VN"],
+        quote: { exchangeRate: "25500", settlementFeeBps: 250 }
+      },
+      vietnamQr: { timeline: [{ type: "QR_CREATED" }] }
     });
+
+    const scanned = await instance.inject({
+      method: "POST",
+      url: `/v1/sandbox/vietnam-qr/${attempt.id}/scan`,
+      payload: { wallet: "VCB" }
+    });
+    expect(scanned.statusCode).toBe(200);
+    expect(scanned.json<{ vietnamQr: { selectedWallet: string; timeline: Array<{ type: string }> } }>())
+      .toMatchObject({
+        vietnamQr: {
+          selectedWallet: "VCB",
+          timeline: [{ type: "QR_CREATED" }, { type: "CUSTOMER_OPENED" }]
+        }
+      });
 
     const completed = await instance.inject({
       method: "POST",
       url: `/v1/sandbox/vietnam-qr/${attempt.id}/complete`,
-      payload: { wallet: "VCB", outcome: "APPROVED" }
+      payload: { wallet: "VCB", outcome: "APPROVED", duplicate: true }
     });
     expect(completed.statusCode).toBe(200);
-    expect(completed.json<{ status: string; tender: string; wallet: { wallet: string } }>())
-      .toMatchObject({ status: "CAPTURED", tender: "vietnam_qr", wallet: { wallet: "VCB" } });
+    const captured = completed.json<{
+      status: string;
+      tender: string;
+      paymentId: string;
+      amountMinor: string;
+      wallet: { wallet: string; payerAmountMinor: string; settlementFeeMinor: string };
+      vietnamQr: { timeline: Array<{ type: string }> };
+    }>();
+    expect(captured).toMatchObject({
+      status: "CAPTURED",
+      tender: "vietnam_qr",
+      wallet: { wallet: "VCB", settlementFeeMinor: "5" }
+    });
+    expect(captured.vietnamQr.timeline.map((event) => event.type)).toEqual([
+      "QR_CREATED",
+      "CUSTOMER_OPENED",
+      "CUSTOMER_APPROVED",
+      "PROVIDER_CONFIRMED",
+      "SETTLED",
+      "DUPLICATE_CALLBACK_IGNORED"
+    ]);
 
     const receipt = await instance.inject({ method: "GET", url: `/v1/orders/${orderId}/receipt` });
-    expect(receipt.json<{ paymentStatus: string; tender: string; wallet: string }>())
-      .toMatchObject({ paymentStatus: "CAPTURED", tender: "vietnam_qr", wallet: "VCB" });
+    expect(receipt.json<{
+      paymentStatus: string;
+      tender: string;
+      wallet: string;
+      vietnamQr: { quote: { exchangeRate: string; settlementFeeMinor: string } };
+    }>()).toMatchObject({
+      paymentStatus: "CAPTURED",
+      tender: "vietnam_qr",
+      wallet: "VCB",
+      vietnamQr: { quote: { exchangeRate: "25500", settlementFeeMinor: "5" } }
+    });
+
+    const refund = await instance.inject({
+      method: "POST",
+      url: `/v1/payments/${captured.paymentId}/refunds`,
+      headers: {
+        "idempotency-key": "vietnam-qr-refund-key",
+        "x-manager-id": "manager-1",
+        "x-manager-key": "manager-test-key"
+      },
+      payload: { amountMinor: "50", reason: "Vietnam QR timeline test" }
+    });
+    expect(refund.statusCode).toBe(201);
+    const refundedReceipt = await instance.inject({
+      method: "GET",
+      url: `/v1/orders/${orderId}/receipt`
+    });
+    expect(refundedReceipt.json<{ vietnamQr: { timeline: Array<{ type: string }> } }>()
+      .vietnamQr.timeline.at(-1)?.type).toBe("REFUNDED");
   });
 
   it("resolves an UNKNOWN attempt by replaying the original idempotent request", async () => {

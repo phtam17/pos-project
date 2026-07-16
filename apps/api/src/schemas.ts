@@ -33,7 +33,13 @@ export const paymentAttemptSchema = z.object({
 
 export const sandboxVietnamQrCompletionSchema = z.object({
   wallet: z.enum(["VCB", "MOMO", "ZALOPAY", "SHOPEEPAY_VN"]),
-  outcome: z.enum(["APPROVED", "DECLINED", "EXPIRED"])
+  outcome: z.enum(["APPROVED", "DECLINED", "EXPIRED"]),
+  delayMs: z.number().int().min(0).max(30_000).default(0),
+  duplicate: z.boolean().default(false)
+}).strict();
+
+export const sandboxVietnamQrScanSchema = z.object({
+  wallet: z.enum(["VCB", "MOMO", "ZALOPAY", "SHOPEEPAY_VN"])
 }).strict();
 
 export const refundSchema = z.object({

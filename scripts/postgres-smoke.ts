@@ -138,6 +138,51 @@ try {
   assert.equal(refundedReceiptResponse.statusCode, 200, refundedReceiptResponse.body);
   assert.equal(refundedReceiptResponse.json<{ refundStatus: string }>().refundStatus, "FULL");
 
+  const qrCartId = (await app.inject({ method: "POST", url: "/v1/carts", payload: {} }))
+    .json<{ id: string }>().id;
+  assert.equal((await app.inject({
+    method: "POST",
+    url: `/v1/carts/${qrCartId}/lines`,
+    payload: { productId: products[0]!.id, quantity: 1 }
+  })).statusCode, 201);
+  const qrOrderId = (await app.inject({
+    method: "POST",
+    url: `/v1/carts/${qrCartId}/checkout`,
+    headers: { "idempotency-key": `checkout-${randomUUID()}` }
+  })).json<{ id: string }>().id;
+  const qrStarted = await app.inject({
+    method: "POST",
+    url: `/v1/orders/${qrOrderId}/payment-attempts`,
+    headers: { "idempotency-key": `payment-${randomUUID()}` },
+    payload: { tender: "vietnam_qr" }
+  });
+  assert.equal(qrStarted.statusCode, 201, qrStarted.body);
+  const qrAttemptId = qrStarted.json<{ id: string }>().id;
+  assert.equal((await app.inject({
+    method: "POST",
+    url: `/v1/sandbox/vietnam-qr/${qrAttemptId}/scan`,
+    payload: { wallet: "MOMO" }
+  })).statusCode, 200);
+  const qrCaptured = await app.inject({
+    method: "POST",
+    url: `/v1/sandbox/vietnam-qr/${qrAttemptId}/complete`,
+    payload: { wallet: "MOMO", outcome: "APPROVED", duplicate: true }
+  });
+  assert.equal(qrCaptured.statusCode, 200, qrCaptured.body);
+  const persistedQrAttempt = await repository.getPaymentAttempt(qrAttemptId);
+  assert.equal(persistedQrAttempt?.vietnamQr?.selectedWallet, "MOMO");
+  assert.equal(persistedQrAttempt?.vietnamQr?.quote.exchangeRate, "25500");
+  assert.equal(persistedQrAttempt?.vietnamQr?.quote.settlementFeeBps, 250);
+  assert.ok(
+    persistedQrAttempt?.vietnamQr?.timeline.some(
+      (event) => event.type === "DUPLICATE_CALLBACK_IGNORED"
+    ),
+    "PostgreSQL snapshot should persist the Vietnam QR timeline"
+  );
+  const qrReceipt = await app.inject({ method: "GET", url: `/v1/orders/${qrOrderId}/receipt` });
+  assert.equal(qrReceipt.statusCode, 200, qrReceipt.body);
+  assert.equal(qrReceipt.json<{ vietnamQr: { selectedWallet: string } }>().vietnamQr.selectedWallet, "MOMO");
+
   const worker = await runWorkerOnce({
     repository,
     provider,
@@ -160,6 +205,7 @@ try {
     productCount: products.length,
     orderId,
     secondOrderId,
+    qrOrderId,
     settlementLines: worker.settlementLines
   }));
 } finally {

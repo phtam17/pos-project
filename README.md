@@ -50,15 +50,26 @@ Alipay+ flow without moving real money:
 
 1. Add products to the cart and select **Vietnam QR**.
 2. The register creates an order-specific, expiring QR code.
-3. Choose **VCB Digibank**, **MoMo**, **ZaloPay**, or **ShopeePay VN** to simulate
-   that app sending a signed approval.
-4. Use **Simulate decline** or **Expire / cancel QR** to exercise recovery paths.
-5. An approved payment produces a normal receipt labeled with the selected wallet.
+3. Choose **VCB Digibank**, **MoMo**, **ZaloPay**, or **ShopeePay VN** to record
+   the customer opening/scanning the QR before approval.
+4. Use **Approve now**, **Approve after 5s**, or **Duplicate callback**. The register
+   polls the original payment attempt every 1.5 seconds and automatically detects
+   an expired quote without creating a replacement charge.
+5. Use **Decline** or **Expire now** to exercise the terminal recovery paths.
+6. The live panel, order detail, and receipt show the selected wallet, approximate
+   VND amount, illustrative FX rate, 2.5% fee, merchant net, and payment timeline.
 
 The displayed QR encodes a sandbox URL and cannot be paid by a real banking app. The
 simulator uses an illustrative VND rate of 25,500 VND/USD and a 2.5% settlement fee
 so FX, fee, refund, and reconciliation behavior can be developed before an acquirer
 provides real sandbox credentials. Neither value is a commercial quote.
+
+The payment-attempt snapshot persists the wallet selection, VND quote, exchange
+rate, fee, net amount, expiration, and idempotent timeline events. The timeline
+records QR creation, customer scan, approval, provider confirmation, settlement,
+refunds, delayed callbacks, and ignored duplicates. PostgreSQL therefore retains
+the demonstration data across API restarts instead of reconstructing it from a
+provider-reference string.
 
 ## Test order history and refunds
 

@@ -4,19 +4,23 @@ import type {
   CardSummary,
   Money,
   PaymentAttemptStatus,
+  PaymentTimelineEventSnapshot,
+  PaymentTimelineEventType,
+  VietnamQrDetailsSnapshot,
+  VietnamQrQuoteSnapshot,
+  VietnamQrWallet,
 } from "@pos/domain";
 
 export type PaymentResultStatus = Exclude<PaymentAttemptStatus, "CREATED">;
 
 export type PaymentMethodKind = "CARD" | "VIETNAM_QR";
-export type VietnamQrWallet = "VCB" | "MOMO" | "ZALOPAY" | "SHOPEEPAY_VN";
-
 export interface QrPaymentPresentation {
   readonly type: "QR_CODE";
   readonly payload: string;
   readonly expiresAt: Date;
   readonly supportedWallets: readonly VietnamQrWallet[];
   readonly sandbox: boolean;
+  readonly quote: VietnamQrQuoteSnapshot;
 }
 
 export type PaymentPresentation = QrPaymentPresentation;
@@ -26,6 +30,9 @@ export interface WalletPaymentSummary {
   readonly payerCurrency: "VND";
   readonly payerAmountMinor: string;
   readonly exchangeRate: string;
+  readonly settlementFeeBps: number;
+  readonly settlementFeeMinor: string;
+  readonly merchantNetMinor: string;
 }
 
 export interface PaymentCapabilities {
@@ -62,6 +69,7 @@ export interface PaymentResult {
   readonly card: CardSummary | null;
   readonly presentation?: QrPaymentPresentation;
   readonly wallet?: WalletPaymentSummary;
+  readonly vietnamQr?: VietnamQrDetailsSnapshot;
   readonly processedAt: Date;
 }
 
@@ -164,4 +172,9 @@ export type {
   CardSummary,
   Money,
   PaymentAttemptStatus,
+  PaymentTimelineEventSnapshot,
+  PaymentTimelineEventType,
+  VietnamQrDetailsSnapshot,
+  VietnamQrQuoteSnapshot,
+  VietnamQrWallet,
 };

@@ -35,7 +35,8 @@ import {
   identifierSchema,
   paymentAttemptSchema,
   refundSchema,
-  sandboxVietnamQrCompletionSchema
+  sandboxVietnamQrCompletionSchema,
+  sandboxVietnamQrScanSchema
 } from "./schemas.js";
 
 declare module "fastify" {
@@ -206,9 +207,12 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     const refundGroups = await Promise.all(
       payments.map((payment) => service.listRefundsForPayment(payment.id))
     );
+    const attempts = await Promise.all(
+      payments.map((payment) => service.getPaymentAttempt(payment.paymentAttemptId, false))
+    );
     return {
       order: orderDto(order),
-      payments: payments.map(paymentDto),
+      payments: payments.map((payment, index) => paymentDto(payment, attempts[index]?.attempt)),
       refunds: refundGroups.flat().map(refundDto)
     };
   });
@@ -251,14 +255,33 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     if (!provider) {
       throw new ApplicationError("Vietnam QR sandbox is not enabled", "SANDBOX_NOT_ENABLED", 404);
     }
-    await provider.completeSandboxPayment(id, body.wallet, body.outcome);
+    await provider.completeSandboxPayment(id, body.wallet, body.outcome, {
+      delayMs: body.delayMs,
+      duplicate: body.duplicate
+    });
+    const result = await service.getPaymentAttempt(id, true);
+    return paymentAttemptDto(result.attempt, result.payment, result.presentation, result.wallet);
+  });
+
+  app.post("/v1/sandbox/vietnam-qr/:id/scan", async (request) => {
+    const { id } = attemptIdParams.parse(request.params);
+    const body = sandboxVietnamQrScanSchema.parse(request.body);
+    const provider = providers.find(
+      (candidate): candidate is SimulatedVietnamQrProvider => candidate instanceof SimulatedVietnamQrProvider
+    );
+    if (!provider) {
+      throw new ApplicationError("Vietnam QR sandbox is not enabled", "SANDBOX_NOT_ENABLED", 404);
+    }
+    await provider.openSandboxPayment(id, body.wallet);
     const result = await service.getPaymentAttempt(id, true);
     return paymentAttemptDto(result.attempt, result.payment, result.presentation, result.wallet);
   });
 
   app.get("/v1/payments/:id", async (request) => {
     const { id } = paymentIdParams.parse(request.params);
-    return paymentDto(await service.getPayment(id));
+    const payment = await service.getPayment(id);
+    const attempt = await service.getPaymentAttempt(payment.paymentAttemptId, false);
+    return paymentDto(payment, attempt.attempt);
   });
 
   app.post("/v1/payments/:id/refunds", async (request, reply) => {
@@ -291,10 +314,13 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     const { id } = orderIdParams.parse(request.params);
     const order = await service.getOrder(id);
     const payments = await service.listPaymentsForOrder(id);
+    const attempt = payments[0]
+      ? (await service.getPaymentAttempt(payments[0].paymentAttemptId, false)).attempt
+      : undefined;
     const refunds = payments[0]
       ? await service.listRefundsForPayment(payments[0].id)
       : [];
-    return receiptDto(order, payments[0], refunds);
+    return receiptDto(order, payments[0], refunds, attempt);
   });
 
   app.post("/v1/providers/simulated/webhooks", async (request, reply) => {

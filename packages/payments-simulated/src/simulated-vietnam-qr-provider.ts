@@ -4,6 +4,7 @@ import {
   type PaymentCapabilities,
   type PaymentProvider,
   type PaymentResult,
+  type PaymentTimelineEventSnapshot,
   type ProviderEvent,
   type ProviderSettlementItem,
   type ProviderWebhookHeaders,
@@ -11,6 +12,8 @@ import {
   type RefundResult,
   type SettlementPage,
   type StartSaleRequest,
+  type VietnamQrDetailsSnapshot,
+  type VietnamQrQuoteSnapshot,
   type VietnamQrWallet,
 } from "@pos/payment-contract";
 
@@ -23,11 +26,28 @@ export const VIETNAM_QR_WALLETS = Object.freeze(
 
 export type SandboxVietnamQrOutcome = "APPROVED" | "DECLINED" | "EXPIRED";
 
+export interface SandboxVietnamQrCallbackOptions {
+  readonly delayMs?: number;
+  readonly duplicate?: boolean;
+}
+
+interface ScheduledCallback {
+  readonly wallet: VietnamQrWallet;
+  readonly outcome: SandboxVietnamQrOutcome;
+  readonly deliverAt: Date;
+  readonly duplicate: boolean;
+}
+
 interface StoredQrSale {
   readonly input: StartSaleRequest;
   readonly fingerprint: string;
   readonly providerReference: string;
   readonly expiresAt: Date;
+  readonly quote: VietnamQrQuoteSnapshot;
+  readonly timeline: PaymentTimelineEventSnapshot[];
+  selectedWallet: VietnamQrWallet | null;
+  scheduledCallback: ScheduledCallback | null;
+  eventSequence: number;
   result: PaymentResult;
   settlementRecorded: boolean;
 }
@@ -100,6 +120,19 @@ export class SimulatedVietnamQrProvider implements PaymentProvider {
     payload.searchParams.set("amount", input.amount.minorUnits.toString());
     payload.searchParams.set("currency", input.amount.currency);
 
+    const quote = vietnamQrQuote(input.amount, expiresAt, this.settlementFeeBps);
+    const createdEvent = timelineEvent(
+      input.attemptId,
+      "QR_CREATED",
+      "Order-specific Vietnam QR code created",
+      now,
+      0,
+    );
+    const vietnamQr: VietnamQrDetailsSnapshot = Object.freeze({
+      quote,
+      selectedWallet: null,
+      timeline: Object.freeze([createdEvent]),
+    });
     const result: PaymentResult = Object.freeze({
       attemptId: input.attemptId,
       status: "PROCESSING",
@@ -114,7 +147,9 @@ export class SimulatedVietnamQrProvider implements PaymentProvider {
         expiresAt,
         supportedWallets: VIETNAM_QR_WALLETS,
         sandbox: true,
+        quote,
       }),
+      vietnamQr,
       processedAt: now,
     });
     const stored: StoredQrSale = {
@@ -122,6 +157,11 @@ export class SimulatedVietnamQrProvider implements PaymentProvider {
       fingerprint,
       providerReference,
       expiresAt,
+      quote,
+      timeline: [createdEvent],
+      selectedWallet: null,
+      scheduledCallback: null,
+      eventSequence: 1,
       result,
       settlementRecorded: false,
     };
@@ -132,9 +172,40 @@ export class SimulatedVietnamQrProvider implements PaymentProvider {
 
   async getStatus(attemptId: string): Promise<PaymentResult> {
     const stored = this.requireSale(requireText(attemptId, "attemptId"));
-    if (stored.result.status === "PROCESSING" && this.now().getTime() >= stored.expiresAt.getTime()) {
-      this.applyOutcome(stored, "VCB", "EXPIRED");
+    const now = this.now();
+    if (stored.result.status === "PROCESSING") {
+      const scheduled = stored.scheduledCallback;
+      if (
+        now.getTime() >= stored.expiresAt.getTime() &&
+        (!scheduled || stored.expiresAt.getTime() <= scheduled.deliverAt.getTime())
+      ) {
+        this.applyOutcome(stored, stored.selectedWallet ?? "VCB", "EXPIRED", stored.expiresAt);
+      } else if (scheduled && now.getTime() >= scheduled.deliverAt.getTime()) {
+        stored.scheduledCallback = null;
+        this.applyOutcome(stored, scheduled.wallet, scheduled.outcome, scheduled.deliverAt);
+        if (scheduled.duplicate) this.recordDuplicateCallback(stored, scheduled.deliverAt);
+      }
     }
+    return copyPaymentResult(stored.result);
+  }
+
+  async openSandboxPayment(
+    attemptId: string,
+    wallet: VietnamQrWallet,
+  ): Promise<PaymentResult> {
+    this.assertWallet(wallet);
+    const stored = this.requireSale(requireText(attemptId, "attemptId"));
+    if (stored.result.status !== "PROCESSING") return copyPaymentResult(stored.result);
+    stored.selectedWallet = wallet;
+    if (!stored.timeline.some((event) => event.type === "CUSTOMER_OPENED")) {
+      this.recordTimeline(
+        stored,
+        "CUSTOMER_OPENED",
+        `${walletLabel(wallet)} opened and scanned the sandbox QR`,
+        this.now(),
+      );
+    }
+    this.refreshProcessingResult(stored, this.now());
     return copyPaymentResult(stored.result);
   }
 
@@ -142,13 +213,37 @@ export class SimulatedVietnamQrProvider implements PaymentProvider {
     attemptId: string,
     wallet: VietnamQrWallet,
     outcome: SandboxVietnamQrOutcome,
+    options: SandboxVietnamQrCallbackOptions = {},
   ): Promise<PaymentResult> {
-    if (!VIETNAM_QR_WALLETS.includes(wallet)) {
-      throw new PaymentProviderError("INVALID_REQUEST", `Unsupported sandbox wallet: ${wallet}`);
-    }
+    this.assertWallet(wallet);
     const stored = this.requireSale(requireText(attemptId, "attemptId"));
-    if (stored.result.status !== "PROCESSING") return copyPaymentResult(stored.result);
-    this.applyOutcome(stored, wallet, outcome);
+    const delayMs = nonNegativeInteger(options.delayMs ?? 0, "delayMs");
+    if (delayMs > 30_000) {
+      throw new PaymentProviderError("INVALID_REQUEST", "delayMs cannot exceed 30000");
+    }
+    if (stored.result.status !== "PROCESSING") {
+      if (options.duplicate) this.recordDuplicateCallback(stored, this.now());
+      return copyPaymentResult(stored.result);
+    }
+    if (!stored.timeline.some((event) => event.type === "CUSTOMER_OPENED")) {
+      await this.openSandboxPayment(attemptId, wallet);
+    }
+    stored.selectedWallet = wallet;
+    if (delayMs > 0) {
+      const deliverAt = new Date(this.now().getTime() + delayMs);
+      stored.scheduledCallback = { wallet, outcome, deliverAt, duplicate: options.duplicate === true };
+      this.recordTimeline(
+        stored,
+        "CALLBACK_SCHEDULED",
+        `Provider callback scheduled with a ${delayMs / 1_000}-second sandbox delay`,
+        this.now(),
+      );
+      this.refreshProcessingResult(stored, this.now());
+      return copyPaymentResult(stored.result);
+    }
+    const processedAt = this.now();
+    this.applyOutcome(stored, wallet, outcome, processedAt);
+    if (options.duplicate) this.recordDuplicateCallback(stored, processedAt);
     return copyPaymentResult(stored.result);
   }
 
@@ -200,6 +295,13 @@ export class SimulatedVietnamQrProvider implements PaymentProvider {
       netAmount: negative,
       occurredAt: processedAt,
     }));
+    this.recordTimeline(
+      sale,
+      "REFUNDED",
+      `Sandbox refund recorded for ${input.amount.minorUnits.toString()} ${input.amount.currency} minor units`,
+      processedAt,
+    );
+    this.refreshTerminalResult(sale);
     return copyRefundResult(result);
   }
 
@@ -240,9 +342,22 @@ export class SimulatedVietnamQrProvider implements PaymentProvider {
     stored: StoredQrSale,
     wallet: VietnamQrWallet,
     outcome: SandboxVietnamQrOutcome,
+    processedAt: Date = this.now(),
   ): void {
-    const processedAt = this.now();
+    stored.selectedWallet = wallet;
     if (outcome === "APPROVED") {
+      this.recordTimeline(
+        stored,
+        "CUSTOMER_APPROVED",
+        `${walletLabel(wallet)} customer approved the illustrative VND amount`,
+        processedAt,
+      );
+      this.recordTimeline(
+        stored,
+        "PROVIDER_CONFIRMED",
+        "Sandbox provider callback confirmed the payment",
+        processedAt,
+      );
       const providerPaymentId = `vnqr_pay_${wallet.toLowerCase()}_${stableHash(stored.input.attemptId)}`;
       stored.result = Object.freeze({
         attemptId: stored.input.attemptId,
@@ -252,13 +367,23 @@ export class SimulatedVietnamQrProvider implements PaymentProvider {
         failureCode: null,
         failureMessage: null,
         card: null,
-        wallet: walletSummary(wallet, stored.input.amount),
+        wallet: walletSummary(wallet, stored.quote),
+        vietnamQr: this.vietnamQrDetails(stored),
         processedAt,
       });
       this.salesByPaymentId.set(providerPaymentId, stored);
       this.recordSettlement(stored, providerPaymentId);
+      this.refreshTerminalResult(stored);
       return;
     }
+    this.recordTimeline(
+      stored,
+      outcome === "DECLINED" ? "DECLINED" : "EXPIRED",
+      outcome === "DECLINED"
+        ? "Sandbox customer declined the Vietnam QR payment"
+        : "Vietnam QR quote expired without moving money",
+      processedAt,
+    );
     stored.result = Object.freeze({
       attemptId: stored.input.attemptId,
       status: outcome === "DECLINED" ? "DECLINED" : "CANCELED",
@@ -269,6 +394,7 @@ export class SimulatedVietnamQrProvider implements PaymentProvider {
         ? "The sandbox customer declined the Vietnam QR payment"
         : "The sandbox Vietnam QR code expired",
       card: null,
+      vietnamQr: this.vietnamQrDetails(stored),
       processedAt,
     });
   }
@@ -289,6 +415,91 @@ export class SimulatedVietnamQrProvider implements PaymentProvider {
       netAmount: stored.input.amount.subtract(fee),
       occurredAt: stored.result.processedAt,
     }));
+    this.recordTimeline(
+      stored,
+      "SETTLED",
+      "Sandbox settlement recorded after the illustrative fee",
+      stored.result.processedAt,
+    );
+  }
+
+  private refreshProcessingResult(stored: StoredQrSale, processedAt: Date): void {
+    const payload = new URL("https://sandbox.openpos.local/vietnam-qr");
+    payload.searchParams.set("attempt", stored.input.attemptId);
+    payload.searchParams.set("amount", stored.input.amount.minorUnits.toString());
+    payload.searchParams.set("currency", stored.input.amount.currency);
+    stored.result = Object.freeze({
+      attemptId: stored.input.attemptId,
+      status: "PROCESSING",
+      providerPaymentId: null,
+      providerReference: stored.providerReference,
+      failureCode: null,
+      failureMessage: null,
+      card: null,
+      presentation: Object.freeze({
+        type: "QR_CODE",
+        payload: payload.toString(),
+        expiresAt: stored.expiresAt,
+        supportedWallets: VIETNAM_QR_WALLETS,
+        sandbox: true,
+        quote: stored.quote,
+      }),
+      ...(stored.selectedWallet
+        ? { wallet: walletSummary(stored.selectedWallet, stored.quote) }
+        : {}),
+      vietnamQr: this.vietnamQrDetails(stored),
+      processedAt,
+    });
+  }
+
+  private refreshTerminalResult(stored: StoredQrSale): void {
+    stored.result = Object.freeze({
+      ...stored.result,
+      ...(stored.selectedWallet
+        ? { wallet: walletSummary(stored.selectedWallet, stored.quote) }
+        : {}),
+      vietnamQr: this.vietnamQrDetails(stored),
+    });
+  }
+
+  private vietnamQrDetails(stored: StoredQrSale): VietnamQrDetailsSnapshot {
+    return Object.freeze({
+      quote: stored.quote,
+      selectedWallet: stored.selectedWallet,
+      timeline: Object.freeze(stored.timeline.map(copyTimelineEvent)),
+    });
+  }
+
+  private recordTimeline(
+    stored: StoredQrSale,
+    type: PaymentTimelineEventSnapshot["type"],
+    description: string,
+    occurredAt: Date,
+  ): void {
+    stored.timeline.push(timelineEvent(
+      stored.input.attemptId,
+      type,
+      description,
+      occurredAt,
+      stored.eventSequence,
+    ));
+    stored.eventSequence += 1;
+  }
+
+  private recordDuplicateCallback(stored: StoredQrSale, occurredAt: Date): void {
+    this.recordTimeline(
+      stored,
+      "DUPLICATE_CALLBACK_IGNORED",
+      "Duplicate provider callback ignored; no second payment was created",
+      occurredAt,
+    );
+    this.refreshTerminalResult(stored);
+  }
+
+  private assertWallet(wallet: VietnamQrWallet): void {
+    if (!VIETNAM_QR_WALLETS.includes(wallet)) {
+      throw new PaymentProviderError("INVALID_REQUEST", `Unsupported sandbox wallet: ${wallet}`);
+    }
   }
 
   private requireSale(attemptId: string): StoredQrSale {
@@ -306,15 +517,61 @@ export class SimulatedVietnamQrProvider implements PaymentProvider {
   }
 }
 
-function walletSummary(wallet: VietnamQrWallet, amount: Money) {
-  const exchangeRate = 25_500n;
-  const payerAmount = amount.minorUnits * exchangeRate / 100n;
+function walletSummary(wallet: VietnamQrWallet, quote: VietnamQrQuoteSnapshot) {
   return Object.freeze({
     wallet,
-    payerCurrency: "VND" as const,
+    payerCurrency: quote.payerCurrency,
+    payerAmountMinor: quote.payerAmountMinor,
+    exchangeRate: quote.exchangeRate,
+    settlementFeeBps: quote.settlementFeeBps,
+    settlementFeeMinor: quote.settlementFeeMinor,
+    merchantNetMinor: quote.merchantNetMinor,
+  });
+}
+
+function walletLabel(wallet: VietnamQrWallet): string {
+  if (wallet === "VCB") return "VCB Digibank";
+  if (wallet === "MOMO") return "MoMo";
+  if (wallet === "ZALOPAY") return "ZaloPay";
+  return "ShopeePay VN";
+}
+
+function vietnamQrQuote(
+  amount: Money,
+  expiresAt: Date,
+  settlementFeeBps: number,
+): VietnamQrQuoteSnapshot {
+  const exchangeRate = 25_500n;
+  const payerAmount = amount.minorUnits * exchangeRate / 100n;
+  const feeMinor = (amount.minorUnits * BigInt(settlementFeeBps) + 5_000n) / 10_000n;
+  return Object.freeze({
+    payerCurrency: "VND",
     payerAmountMinor: payerAmount.toString(),
     exchangeRate: exchangeRate.toString(),
+    settlementFeeBps,
+    settlementFeeMinor: feeMinor.toString(),
+    merchantNetMinor: (amount.minorUnits - feeMinor).toString(),
+    expiresAt: new Date(expiresAt.getTime()),
   });
+}
+
+function timelineEvent(
+  attemptId: string,
+  type: PaymentTimelineEventSnapshot["type"],
+  description: string,
+  occurredAt: Date,
+  sequence: number,
+): PaymentTimelineEventSnapshot {
+  return Object.freeze({
+    id: `${attemptId}:${type}:${sequence}`,
+    type,
+    description,
+    occurredAt: new Date(occurredAt.getTime()),
+  });
+}
+
+function copyTimelineEvent(event: PaymentTimelineEventSnapshot): PaymentTimelineEventSnapshot {
+  return Object.freeze({ ...event, occurredAt: new Date(event.occurredAt.getTime()) });
 }
 
 function validateSale(input: StartSaleRequest): void {
@@ -376,12 +633,26 @@ function copyPaymentResult(result: PaymentResult): PaymentResult {
             ...result.presentation,
             expiresAt: new Date(result.presentation.expiresAt.getTime()),
             supportedWallets: Object.freeze([...result.presentation.supportedWallets]),
+            quote: copyQuote(result.presentation.quote),
           }),
         }
       : {}),
     ...(result.wallet ? { wallet: Object.freeze({ ...result.wallet }) } : {}),
+    ...(result.vietnamQr
+      ? {
+          vietnamQr: Object.freeze({
+            quote: copyQuote(result.vietnamQr.quote),
+            selectedWallet: result.vietnamQr.selectedWallet,
+            timeline: Object.freeze(result.vietnamQr.timeline.map(copyTimelineEvent)),
+          }),
+        }
+      : {}),
     processedAt: new Date(result.processedAt.getTime()),
   });
+}
+
+function copyQuote(quote: VietnamQrQuoteSnapshot): VietnamQrQuoteSnapshot {
+  return Object.freeze({ ...quote, expiresAt: new Date(quote.expiresAt.getTime()) });
 }
 
 function copyRefundResult(result: RefundResult): RefundResult {

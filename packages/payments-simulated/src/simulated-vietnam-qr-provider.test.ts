@@ -25,6 +25,22 @@ describe("SimulatedVietnamQrProvider", () => {
       type: "QR_CODE",
       sandbox: true,
       supportedWallets: ["VCB", "MOMO", "ZALOPAY", "SHOPEEPAY_VN"],
+      quote: {
+        payerAmountMinor: "637500",
+        exchangeRate: "25500",
+        settlementFeeBps: 250,
+        settlementFeeMinor: "63",
+        merchantNetMinor: "2437",
+      },
+    });
+
+    const scanned = await provider.openSandboxPayment(pending.attemptId, "MOMO");
+    expect(scanned.vietnamQr).toMatchObject({
+      selectedWallet: "MOMO",
+      timeline: [
+        { type: "QR_CREATED" },
+        { type: "CUSTOMER_OPENED" },
+      ],
     });
 
     const captured = await provider.completeSandboxPayment(
@@ -39,6 +55,19 @@ describe("SimulatedVietnamQrProvider", () => {
         payerCurrency: "VND",
         payerAmountMinor: "637500",
         exchangeRate: "25500",
+        settlementFeeBps: 250,
+        settlementFeeMinor: "63",
+        merchantNetMinor: "2437",
+      },
+      vietnamQr: {
+        selectedWallet: "MOMO",
+        timeline: [
+          { type: "QR_CREATED" },
+          { type: "CUSTOMER_OPENED" },
+          { type: "CUSTOMER_APPROVED" },
+          { type: "PROVIDER_CONFIRMED" },
+          { type: "SETTLED" },
+        ],
       },
     });
 
@@ -50,6 +79,51 @@ describe("SimulatedVietnamQrProvider", () => {
       feeAmount: new Money(63n, "USD"),
       netAmount: new Money(2_437n, "USD"),
     });
+  });
+
+  it("delivers delayed callbacks through status polling and ignores duplicates", async () => {
+    let current = new Date("2026-07-15T12:00:00.000Z");
+    const provider = new SimulatedVietnamQrProvider({ clock: () => current });
+    const pending = await provider.startSale(sale("delayed"));
+    await provider.openSandboxPayment(pending.attemptId, "VCB");
+    const scheduled = await provider.completeSandboxPayment(
+      pending.attemptId,
+      "VCB",
+      "APPROVED",
+      { delayMs: 5_000, duplicate: true },
+    );
+    expect(scheduled.status).toBe("PROCESSING");
+    expect(scheduled.vietnamQr?.timeline.map((event) => event.type))
+      .toContain("CALLBACK_SCHEDULED");
+
+    current = new Date("2026-07-15T12:00:04.000Z");
+    expect((await provider.getStatus(pending.attemptId)).status).toBe("PROCESSING");
+    current = new Date("2026-07-15T12:00:06.000Z");
+    const captured = await provider.getStatus(pending.attemptId);
+    expect(captured.status).toBe("CAPTURED");
+    expect(captured.vietnamQr?.timeline.map((event) => event.type)).toEqual([
+      "QR_CREATED",
+      "CUSTOMER_OPENED",
+      "CALLBACK_SCHEDULED",
+      "CUSTOMER_APPROVED",
+      "PROVIDER_CONFIRMED",
+      "SETTLED",
+      "DUPLICATE_CALLBACK_IGNORED",
+    ]);
+    expect((await provider.listSettlements()).items).toHaveLength(1);
+  });
+
+  it("automatically expires a QR when its status is polled after the deadline", async () => {
+    let current = new Date("2026-07-15T12:00:00.000Z");
+    const provider = new SimulatedVietnamQrProvider({
+      clock: () => current,
+      expiresInMs: 1_000,
+    });
+    const pending = await provider.startSale(sale("automatic-expiry"));
+    current = new Date("2026-07-15T12:00:02.000Z");
+    const expired = await provider.getStatus(pending.attemptId);
+    expect(expired).toMatchObject({ status: "CANCELED", failureCode: "QR_EXPIRED" });
+    expect(expired.vietnamQr?.timeline.at(-1)?.type).toBe("EXPIRED");
   });
 
   it("supports decline, expiry, and idempotent refunds", async () => {

@@ -21,6 +21,7 @@ import {
   type ReceiptDto,
   type SaleDetailDto,
   type Tender,
+  type VietnamQrDetailsDto,
   type VietnamQrWallet
 } from "./api";
 
@@ -129,6 +130,18 @@ function formatReceiptDate(value: string): string {
   }).format(date);
 }
 
+function formatVnd(value: AmountMinor): string {
+  try {
+    return new Intl.NumberFormat("vi-VN", {
+      style: "currency",
+      currency: "VND",
+      maximumFractionDigits: 0
+    }).format(BigInt(value));
+  } catch {
+    return `${value} VND`;
+  }
+}
+
 function errorMessage(error: unknown): string {
   if (error instanceof ApiError || error instanceof Error) return error.message;
   return "Something went wrong. Please try again.";
@@ -166,7 +179,8 @@ function fallbackReceipt(order: OrderDto, payment: PaymentAttemptDto): ReceiptDt
     refunds: [],
     ...(payment.cardBrand ? { cardBrand: payment.cardBrand } : {}),
     ...(payment.last4 ? { last4: payment.last4 } : {}),
-    ...(payment.wallet ? { wallet: payment.wallet } : {})
+    ...(payment.wallet ? { wallet: payment.wallet } : {}),
+    ...(payment.vietnamQr ? { vietnamQr: payment.vietnamQr } : {})
   };
 }
 
@@ -244,6 +258,12 @@ function ReceiptDialog({ receipt, onClose }: { receipt: ReceiptDto; onClose: () 
               ))}
             </div>
           )}
+          {receipt.vietnamQr && (
+            <div className="receipt-qr-details">
+              <VietnamQrQuoteCard details={receipt.vietnamQr} currency={receipt.currency} compact />
+              <PaymentTimeline details={receipt.vietnamQr} compact />
+            </div>
+          )}
           <p className="receipt-thanks">{receipt.refundStatus === "FULL" ? "This sale has been fully refunded." : "Thank you for your purchase."}</p>
         </div>
       </section>
@@ -259,18 +279,85 @@ function walletLabel(wallet?: VietnamQrWallet): string {
   return "Vietnamese wallet";
 }
 
+function timelineLabel(type: VietnamQrDetailsDto["timeline"][number]["type"]): string {
+  if (type === "QR_CREATED") return "QR created";
+  if (type === "CUSTOMER_OPENED") return "Customer opened / scanned";
+  if (type === "CUSTOMER_APPROVED") return "Customer approved";
+  if (type === "PROVIDER_CONFIRMED") return "Provider confirmed";
+  if (type === "CALLBACK_SCHEDULED") return "Callback delayed";
+  if (type === "DUPLICATE_CALLBACK_IGNORED") return "Duplicate ignored";
+  if (type === "SETTLED") return "Settled";
+  if (type === "REFUNDED") return "Refunded";
+  if (type === "DECLINED") return "Declined";
+  return "Expired";
+}
+
+function VietnamQrQuoteCard({
+  details,
+  currency,
+  compact = false
+}: {
+  details: VietnamQrDetailsDto;
+  currency: string;
+  compact?: boolean;
+}) {
+  const quote = details.quote;
+  return (
+    <div className={`qr-quote-card ${compact ? "compact" : ""}`}>
+      <div className="qr-quote-title"><span>Illustrative sandbox quote</span><b>{details.selectedWallet ? walletLabel(details.selectedWallet) : "Wallet not selected"}</b></div>
+      <dl>
+        <div><dt>Customer sees</dt><dd>≈ {formatVnd(quote.payerAmountMinor)}</dd></div>
+        <div><dt>Demo FX rate</dt><dd>1 {currency} ≈ {new Intl.NumberFormat("vi-VN").format(Number(quote.exchangeRate))} VND</dd></div>
+        <div><dt>Sandbox fee</dt><dd>{(quote.settlementFeeBps / 100).toFixed(2)}% · {formatMoney(quote.settlementFeeMinor, currency)}</dd></div>
+        <div><dt>Illustrative net</dt><dd>{formatMoney(quote.merchantNetMinor, currency)}</dd></div>
+      </dl>
+      <p>Demo assumptions only—not a live FX rate or commercial fee quote.</p>
+    </div>
+  );
+}
+
+function PaymentTimeline({
+  details,
+  compact = false
+}: {
+  details: VietnamQrDetailsDto;
+  compact?: boolean;
+}) {
+  if (details.timeline.length === 0) return null;
+  return (
+    <div className={`payment-timeline ${compact ? "compact" : ""}`}>
+      <h4>Payment timeline</h4>
+      <ol>
+        {details.timeline.map((event) => (
+          <li key={event.id} className={`timeline-${event.type.toLocaleLowerCase()}`}>
+            <span><Icon name={event.type === "DECLINED" || event.type === "EXPIRED" ? "alert" : event.type === "CALLBACK_SCHEDULED" ? "retry" : "check"} /></span>
+            <div><strong>{timelineLabel(event.type)}</strong><small>{event.description}</small></div>
+            <time>{formatDate(event.occurredAt)}</time>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
 function SandboxQrPanel({
   payment,
   amountMinor,
   currency,
   busy,
+  onScan,
   onComplete
 }: {
   payment: PaymentAttemptDto;
   amountMinor: AmountMinor;
   currency: string;
   busy: boolean;
-  onComplete: (wallet: VietnamQrWallet, outcome: "APPROVED" | "DECLINED" | "EXPIRED") => void;
+  onScan: (wallet: VietnamQrWallet) => void;
+  onComplete: (
+    wallet: VietnamQrWallet,
+    outcome: "APPROVED" | "DECLINED" | "EXPIRED",
+    options?: { delayMs?: number; duplicate?: boolean }
+  ) => void;
 }) {
   const [qrImage, setQrImage] = useState<string | null>(null);
   const [secondsLeft, setSecondsLeft] = useState(0);
@@ -302,7 +389,11 @@ function SandboxQrPanel({
   }, [presentation]);
 
   if (!presentation) return null;
-  const estimatedVnd = Math.round(Number(amountMinor) * 255);
+  const details = payment.vietnamQr ?? {
+    quote: presentation.quote,
+    timeline: []
+  };
+  const selectedWallet = details.selectedWallet ?? payment.wallet;
 
   return (
     <section className="sandbox-qr" aria-labelledby="sandbox-qr-title">
@@ -313,24 +404,30 @@ function SandboxQrPanel({
       <div className="sandbox-qr-body">
         <div className="qr-frame">
           {qrImage ? <img src={qrImage} alt="Sandbox Vietnam QR payment code" /> : <span className="spinner" />}
-          <small>Expires in {Math.floor(secondsLeft / 60)}:{String(secondsLeft % 60).padStart(2, "0")}</small>
+          <small className={secondsLeft === 0 ? "expired" : ""}>{secondsLeft === 0 ? "Checking expiration…" : `Expires in ${Math.floor(secondsLeft / 60)}:${String(secondsLeft % 60).padStart(2, "0")}`}</small>
         </div>
         <div className="qr-instructions">
-          <p>In production, the customer scans this order-specific code and approves approximately <strong>{new Intl.NumberFormat("vi-VN", { style: "currency", currency: "VND", maximumFractionDigits: 0 }).format(estimatedVnd)}</strong>.</p>
-          <span>Choose a wallet below to simulate its signed payment confirmation:</span>
+          <p>The selected app will show approximately <strong>{formatVnd(details.quote.payerAmountMinor)}</strong> before approval.</p>
+          <span>{selectedWallet ? `${walletLabel(selectedWallet)} is selected. The customer scan is recorded.` : "Choose a wallet to simulate opening and scanning the QR:"}</span>
           <div className="wallet-grid">
             {presentation.supportedWallets.map((wallet) => (
-              <button key={wallet} type="button" disabled={busy} onClick={() => onComplete(wallet, "APPROVED")}>
-                <b>{walletLabel(wallet)}</b><small>Simulate approval</small>
+              <button className={selectedWallet === wallet ? "selected" : ""} key={wallet} type="button" disabled={busy || secondsLeft === 0} onClick={() => onScan(wallet)}>
+                <b>{walletLabel(wallet)}</b><small>{selectedWallet === wallet ? "Scanned · selected" : "Simulate scan"}</small>
               </button>
             ))}
           </div>
         </div>
       </div>
+      <VietnamQrQuoteCard details={details} currency={currency} />
       <div className="sandbox-qr-controls">
-        <button type="button" disabled={busy} onClick={() => onComplete("VCB", "DECLINED")}>Simulate decline</button>
-        <button type="button" disabled={busy} onClick={() => onComplete("VCB", "EXPIRED")}>Expire / cancel QR</button>
+        <button className="approve" type="button" disabled={busy || !selectedWallet || secondsLeft === 0} onClick={() => selectedWallet && onComplete(selectedWallet, "APPROVED")}>Approve now</button>
+        <button type="button" disabled={busy || !selectedWallet || secondsLeft === 0} onClick={() => selectedWallet && onComplete(selectedWallet, "APPROVED", { delayMs: 5_000 })}>Approve after 5s</button>
+        <button type="button" disabled={busy || !selectedWallet || secondsLeft === 0} onClick={() => selectedWallet && onComplete(selectedWallet, "APPROVED", { duplicate: true })}>Duplicate callback</button>
+        <button type="button" disabled={busy || !selectedWallet || secondsLeft === 0} onClick={() => selectedWallet && onComplete(selectedWallet, "DECLINED")}>Decline</button>
+        <button type="button" disabled={busy || secondsLeft === 0} onClick={() => onComplete(selectedWallet ?? "VCB", "EXPIRED")}>Expire now</button>
       </div>
+      <p className="qr-polling-note"><span className="spinner" /> Polling the same payment attempt every 1.5 seconds. Delayed and duplicate callbacks remain idempotent.</p>
+      <PaymentTimeline details={details} />
       <p className="sandbox-warning"><Icon name="alert" /> This QR contains a test URL and cannot move money or be paid by a real banking app.</p>
     </section>
   );
@@ -606,6 +703,7 @@ function OrdersView({
             <div className="detail-section"><h3>Items</h3>{detail.order.lines.map((line) => <div className="detail-line" key={line.id}><span>{line.quantity} × {line.name}<small>{line.sku}</small></span><strong>{formatMoney(line.lineTotalMinor, detail.order.currency)}</strong></div>)}</div>
             <dl className="detail-totals"><div><dt>Subtotal</dt><dd>{formatMoney(detail.order.subtotalMinor, detail.order.currency)}</dd></div><div><dt>Tax</dt><dd>{formatMoney(detail.order.taxMinor, detail.order.currency)}</dd></div><div className="detail-total"><dt>Original total</dt><dd>{formatMoney(detail.order.totalMinor, detail.order.currency)}</dd></div>{BigInt(detail.refundedMinor) > 0n && <div className="detail-refunded"><dt>Refunded</dt><dd>−{formatMoney(detail.refundedMinor, detail.order.currency)}</dd></div>}<div className="detail-net"><dt>Net paid</dt><dd>{formatMoney(detail.remainingMinor, detail.order.currency)}</dd></div></dl>
             <div className="detail-section"><h3>Payment</h3>{payment ? <div className="payment-detail"><span className="activity-icon success"><Icon name="card" /></span><span><strong>{tenderLabel(payment)}</strong><small>{payment.provider ?? "sandbox"} · {payment.status.toLocaleLowerCase()}</small></span><b>{formatMoney(payment.amountMinor, detail.order.currency)}</b></div> : <p className="detail-muted">No captured payment is attached to this order.</p>}</div>
+            {payment?.vietnamQr && <div className="detail-section qr-history-section"><VietnamQrQuoteCard details={payment.vietnamQr} currency={detail.order.currency} /><PaymentTimeline details={payment.vietnamQr} /></div>}
             {detail.refunds.length > 0 && <div className="detail-section"><h3>Refund history</h3><div className="refund-history">{detail.refunds.map((refund) => <div key={refund.id}><span><strong>{formatMoney(refund.amountMinor, refund.currency)}</strong><small>{formatReceiptDate(refund.createdAt)}</small></span><span className={`status-badge status-${refund.status.toLocaleLowerCase()}`}>{orderStatusLabel(refund.status)}</span></div>)}</div></div>}
             <div className="order-detail-actions"><button type="button" onClick={() => void showReceipt()}><Icon name="receipt" />Receipt</button><button className="refund-action" type="button" disabled={!canRefund} onClick={() => setRefundOpen(true)}><Icon name="retry" />{BigInt(detail.refundedMinor) > 0n ? "Refund remaining" : "Refund"}</button></div>
             {!canRefund && payment && <p className="refund-unavailable">This payment has no remaining refundable balance.</p>}
@@ -638,6 +736,7 @@ export function App() {
   const [now, setNow] = useState(() => new Date());
   const initialized = useRef(false);
   const searchInput = useRef<HTMLInputElement>(null);
+  const qrPollInFlight = useRef(false);
 
   const initialize = async () => {
     setLoading(true);
@@ -799,26 +898,59 @@ export function App() {
     }
   };
 
+  const applyVietnamQrResult = async (payment: PaymentAttemptDto) => {
+    if (!pendingPayment) return;
+    if (SUCCESS_STATUSES.has(payment.status)) {
+      setQrAttempt(null);
+      await completePayment(pendingPayment, payment);
+      return;
+    }
+    if (DECLINED_STATUSES.has(payment.status)) {
+      setQrAttempt(null);
+      setPaymentState({
+        phase: "declined",
+        message: payment.failureMessage ?? (payment.status === "CANCELED"
+          ? "The QR quote expired without moving money."
+          : "The sandbox customer declined the payment.")
+      });
+      return;
+    }
+    setQrAttempt(payment);
+    const delayed = payment.vietnamQr?.timeline.some((event) => event.type === "CALLBACK_SCHEDULED");
+    setPaymentState({
+      phase: "awaiting-qr",
+      message: delayed
+        ? "A delayed provider callback is queued. Polling the original attempt safely…"
+        : payment.wallet
+          ? `${walletLabel(payment.wallet)} scanned the QR. Waiting for approval.`
+          : "Waiting for the selected Vietnamese app to confirm payment."
+    });
+  };
+
+  const scanSandboxQr = async (wallet: VietnamQrWallet) => {
+    if (!qrAttempt || paymentBusy) return;
+    setPaymentBusy(true);
+    setPageError(null);
+    try {
+      await applyVietnamQrResult(await api.scanSandboxVietnamQr(qrAttempt.id, wallet));
+    } catch (error) {
+      setPageError(errorMessage(error));
+    } finally {
+      setPaymentBusy(false);
+    }
+  };
+
   const completeSandboxQr = async (
     wallet: VietnamQrWallet,
-    outcome: "APPROVED" | "DECLINED" | "EXPIRED"
+    outcome: "APPROVED" | "DECLINED" | "EXPIRED",
+    options: { delayMs?: number; duplicate?: boolean } = {}
   ) => {
     if (!qrAttempt || !pendingPayment || paymentBusy) return;
     setPaymentBusy(true);
     setPageError(null);
     try {
-      const payment = await api.completeSandboxVietnamQr(qrAttempt.id, wallet, outcome);
-      setQrAttempt(null);
-      if (SUCCESS_STATUSES.has(payment.status)) {
-        await completePayment(pendingPayment, payment);
-      } else {
-        setPaymentState({
-          phase: "declined",
-          message: payment.failureMessage ?? (outcome === "EXPIRED"
-            ? "The QR code expired without moving money."
-            : "The sandbox customer declined the payment.")
-        });
-      }
+      const payment = await api.completeSandboxVietnamQr(qrAttempt.id, wallet, outcome, options);
+      await applyVietnamQrResult(payment);
     } catch (error) {
       setPaymentState({
         phase: "unknown",
@@ -828,6 +960,38 @@ export function App() {
       setPaymentBusy(false);
     }
   };
+
+  useEffect(() => {
+    if (
+      paymentState.phase !== "awaiting-qr" ||
+      !qrAttempt ||
+      !pendingPayment ||
+      paymentBusy
+    ) return;
+    let active = true;
+    const poll = async () => {
+      if (qrPollInFlight.current) return;
+      qrPollInFlight.current = true;
+      try {
+        const payment = await api.getPaymentAttempt(qrAttempt.id);
+        if (active) await applyVietnamQrResult(payment);
+      } catch (error) {
+        if (active) {
+          setPaymentState({
+            phase: "awaiting-qr",
+            message: `${errorMessage(error)} Polling will retry the same attempt.`
+          });
+        }
+      } finally {
+        qrPollInFlight.current = false;
+      }
+    };
+    const timer = window.setInterval(() => void poll(), 1_500);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [paymentBusy, paymentState.phase, pendingPayment?.order.id, qrAttempt?.id]);
 
   const submitCheckout = async (pending: PendingCheckout) => {
     if (!cart || cart.id !== pending.cartId) return;
@@ -1111,7 +1275,8 @@ export function App() {
                 amountMinor={pendingPayment.order.totalMinor}
                 currency={pendingPayment.order.currency}
                 busy={paymentBusy}
-                onComplete={(wallet, outcome) => void completeSandboxQr(wallet, outcome)}
+                onScan={(wallet) => void scanSandboxQr(wallet)}
+                onComplete={(wallet, outcome, options) => void completeSandboxQr(wallet, outcome, options)}
               />
             )}
 

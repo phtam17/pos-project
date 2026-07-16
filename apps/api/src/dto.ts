@@ -1,4 +1,12 @@
-import type { Cart, Order, Payment, PaymentAttempt, Product, Refund } from "@pos/domain";
+import type {
+  Cart,
+  Order,
+  Payment,
+  PaymentAttempt,
+  Product,
+  Refund,
+  VietnamQrDetailsSnapshot
+} from "@pos/domain";
 import type { PaymentPresentation, WalletPaymentSummary } from "@pos/payment-contract";
 
 function amount(value: { readonly minorUnits: bigint }): string {
@@ -85,6 +93,18 @@ export function paymentAttemptDto(
 ): Record<string, unknown> {
   const card = payment?.card;
   const isVietnamQr = attempt.provider === "simulated-vietnam-qr";
+  const persistedVietnamQr = attempt.vietnamQr;
+  const selectedWallet = wallet ?? (persistedVietnamQr?.selectedWallet
+    ? {
+        wallet: persistedVietnamQr.selectedWallet,
+        payerCurrency: persistedVietnamQr.quote.payerCurrency,
+        payerAmountMinor: persistedVietnamQr.quote.payerAmountMinor,
+        exchangeRate: persistedVietnamQr.quote.exchangeRate,
+        settlementFeeBps: persistedVietnamQr.quote.settlementFeeBps,
+        settlementFeeMinor: persistedVietnamQr.quote.settlementFeeMinor,
+        merchantNetMinor: persistedVietnamQr.quote.merchantNetMinor
+      }
+    : undefined);
   return {
     id: attempt.id,
     orderId: attempt.orderId,
@@ -114,20 +134,26 @@ export function paymentAttemptDto(
       ? {
           presentation: {
             ...presentation,
-            expiresAt: presentation.expiresAt.toISOString()
+            expiresAt: presentation.expiresAt.toISOString(),
+            quote: quoteDto(presentation.quote)
           }
         }
       : {}),
-    ...(wallet ? { wallet } : {}),
+    ...(selectedWallet ? { wallet: selectedWallet } : {}),
+    ...(persistedVietnamQr ? { vietnamQr: vietnamQrDto(persistedVietnamQr) } : {}),
     paymentId: payment?.id,
     createdAt: attempt.createdAt.toISOString(),
     updatedAt: attempt.updatedAt.toISOString()
   };
 }
 
-export function paymentDto(payment: Payment): Record<string, unknown> {
+export function paymentDto(
+  payment: Payment,
+  attempt?: PaymentAttempt
+): Record<string, unknown> {
   const isVietnamQr = payment.provider === "simulated-vietnam-qr";
-  const wallet = isVietnamQr ? walletFromReference(payment.providerReference) : undefined;
+  const vietnamQr = isVietnamQr ? attempt?.vietnamQr ?? undefined : undefined;
+  const wallet = vietnamQr?.selectedWallet;
   return {
     id: payment.id,
     orderId: payment.orderId,
@@ -141,7 +167,20 @@ export function paymentDto(payment: Payment): Record<string, unknown> {
     cardBrand: payment.card?.brand,
     last4: payment.card?.last4,
     entryMethod: payment.card?.entryMethod,
-    ...(wallet ? { wallet: { wallet } } : {}),
+    ...(wallet
+      ? {
+          wallet: {
+            wallet,
+            payerCurrency: vietnamQr.quote.payerCurrency,
+            payerAmountMinor: vietnamQr.quote.payerAmountMinor,
+            exchangeRate: vietnamQr.quote.exchangeRate,
+            settlementFeeBps: vietnamQr.quote.settlementFeeBps,
+            settlementFeeMinor: vietnamQr.quote.settlementFeeMinor,
+            merchantNetMinor: vietnamQr.quote.merchantNetMinor
+          }
+        }
+      : {}),
+    ...(vietnamQr ? { vietnamQr: vietnamQrDto(vietnamQr) } : {}),
     capturedAt: payment.capturedAt.toISOString()
   };
 }
@@ -164,7 +203,8 @@ export function refundDto(refund: Refund): Record<string, unknown> {
 export function receiptDto(
   order: Order,
   payment?: Payment,
-  refunds: readonly Refund[] = []
+  refunds: readonly Refund[] = [],
+  attempt?: PaymentAttempt
 ): Record<string, unknown> {
   const dto = orderDto(order);
   const succeededRefunds = refunds.filter((refund) => refund.status === "SUCCEEDED");
@@ -182,9 +222,10 @@ export function receiptDto(
       : remainingMinor === 0n
         ? "FULL"
         : "PARTIAL";
-  const wallet = payment?.provider === "simulated-vietnam-qr"
-    ? walletFromReference(payment.providerReference)
+  const vietnamQr = payment?.provider === "simulated-vietnam-qr"
+    ? attempt?.vietnamQr ?? undefined
     : undefined;
+  const wallet = vietnamQr?.selectedWallet;
   return {
     ...dto,
     orderId: order.id,
@@ -208,14 +249,35 @@ export function receiptDto(
     refundedMinor: refundedMinor.toString(),
     remainingMinor: remainingMinor.toString(),
     refunds: refunds.map(refundDto),
-    payment: payment ? paymentDto(payment) : undefined,
+    payment: payment ? paymentDto(payment, attempt) : undefined,
     cardBrand: payment?.card?.brand,
     last4: payment?.card?.last4,
-    ...(wallet ? { wallet } : {})
+    ...(wallet ? { wallet } : {}),
+    ...(vietnamQr ? { vietnamQr: vietnamQrDto(vietnamQr) } : {})
   };
 }
 
-function walletFromReference(reference: string): string | undefined {
-  const match = /^vnqr_pay_(vcb|momo|zalopay|shopeepay_vn)_/.exec(reference);
-  return match?.[1]?.toUpperCase();
+function vietnamQrDto(value: VietnamQrDetailsSnapshot): Record<string, unknown> {
+  return {
+    quote: quoteDto(value.quote),
+    selectedWallet: value.selectedWallet,
+    timeline: value.timeline.map((event) => ({
+      id: event.id,
+      type: event.type,
+      description: event.description,
+      occurredAt: event.occurredAt.toISOString()
+    }))
+  };
+}
+
+function quoteDto(value: VietnamQrDetailsSnapshot["quote"]): Record<string, unknown> {
+  return {
+    payerCurrency: value.payerCurrency,
+    payerAmountMinor: value.payerAmountMinor,
+    exchangeRate: value.exchangeRate,
+    settlementFeeBps: value.settlementFeeBps,
+    settlementFeeMinor: value.settlementFeeMinor,
+    merchantNetMinor: value.merchantNetMinor,
+    expiresAt: value.expiresAt.toISOString()
+  };
 }
