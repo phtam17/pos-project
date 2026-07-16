@@ -7,6 +7,8 @@ export interface ProductSnapshot {
   readonly id: ProductId;
   readonly sku: string;
   readonly name: string;
+  readonly category: string;
+  readonly barcode: string | null;
   readonly unitPrice: Money;
   readonly taxRateBps: number;
   readonly active: boolean;
@@ -16,6 +18,8 @@ export interface ProductInput {
   readonly id: ProductId;
   readonly sku: string;
   readonly name: string;
+  readonly category?: string;
+  readonly barcode?: string | null;
   readonly unitPrice: Money;
   readonly taxRateBps?: number;
   readonly active?: boolean;
@@ -25,6 +29,8 @@ export class Product implements ProductSnapshot {
   readonly id: ProductId;
   readonly sku: string;
   readonly name: string;
+  readonly category: string;
+  readonly barcode: string | null;
   readonly unitPrice: Money;
   readonly taxRateBps: number;
   readonly active: boolean;
@@ -33,6 +39,9 @@ export class Product implements ProductSnapshot {
     this.id = requireNonEmpty(input.id, "product.id");
     this.sku = requireNonEmpty(input.sku, "product.sku");
     this.name = requireNonEmpty(input.name, "product.name");
+    this.category = requireNonEmpty(input.category ?? "Other", "product.category");
+    const barcode = input.barcode?.trim() ?? "";
+    this.barcode = barcode.length > 0 ? barcode : null;
     if (!(input.unitPrice instanceof Money) || input.unitPrice.isNegative()) {
       throw new DomainValidationError(
         "product.unitPrice must be non-negative Money",
@@ -58,11 +67,17 @@ export class Product implements ProductSnapshot {
     return new Product(snapshot);
   }
 
+  withChanges(input: Omit<ProductInput, "id">): Product {
+    return new Product({ id: this.id, ...input });
+  }
+
   toSnapshot(): ProductSnapshot {
     return Object.freeze({
       id: this.id,
       sku: this.sku,
       name: this.name,
+      category: this.category,
+      barcode: this.barcode,
       unitPrice: this.unitPrice,
       taxRateBps: this.taxRateBps,
       active: this.active,

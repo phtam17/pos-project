@@ -4,6 +4,7 @@ import {
   Cart,
   DomainValidationError,
   InvalidStateTransitionError,
+  MerchantSettings,
   Money,
   Order,
   OutboxMessage,
@@ -41,20 +42,44 @@ describe("cart and order totals", () => {
     const cart = new Cart({ id: "cart-1", currency: "USD", createdAt: T0 });
     cart.addProduct(product, 2, "line-1", T1);
     cart.applyLineDiscount("line-1", new Money(100n, "USD"), T1);
+    cart.setTip(new Money(300n, "USD"), T1);
 
     expect(cart.subtotal.minorUnits).toBe(2_000n);
     expect(cart.discountTotal.minorUnits).toBe(100n);
     expect(cart.taxTotal.minorUnits).toBe(157n);
-    expect(cart.total.minorUnits).toBe(2_057n);
+    expect(cart.tip.minorUnits).toBe(300n);
+    expect(cart.total.minorUnits).toBe(2_357n);
 
     const order = Order.fromCart("order-1", cart, T1);
     expect(Object.isFrozen(order.lines)).toBe(true);
     expect(Object.isFrozen(order.lines[0])).toBe(true);
-    expect(order.total.minorUnits).toBe(2_057n);
+    expect(order.tipTotal.minorUnits).toBe(300n);
+    expect(order.total.minorUnits).toBe(2_357n);
 
     cart.setQuantity("line-1", 3, T2);
     expect(cart.total.minorUnits).not.toBe(order.total.minorUnits);
     expect(order.lines[0]?.quantity).toBe(2);
+  });
+
+  it("validates and versions merchant settings", () => {
+    const settings = MerchantSettings.defaults(T0);
+    const updated = settings.withChanges({
+      merchantName: "Little Saigon Market",
+      locationName: "Mesa",
+      registerName: "Front register",
+      currency: "USD",
+      receiptHeader: "Sandbox only",
+      receiptFooter: "Cảm ơn!",
+      showSkuOnReceipt: false,
+      discountsEnabled: true,
+      tipsEnabled: false
+    }, T1);
+    expect(updated).toMatchObject({
+      merchantName: "Little Saigon Market",
+      version: 2,
+      tipsEnabled: false
+    });
+    expect(settings.merchantName).toBe("Open POS");
   });
 
   it("validates order payment lifecycle and exact captured total", () => {

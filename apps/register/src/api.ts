@@ -53,9 +53,36 @@ export interface ProductDto {
   sku: string;
   barcode?: string;
   category: string;
+  taxRateBps: number;
   priceMinor: AmountMinor;
   currency: string;
   available: boolean;
+}
+
+export interface ProductInputDto {
+  sku: string;
+  name: string;
+  category: string;
+  barcode?: string | null;
+  priceMinor: AmountMinor;
+  currency: string;
+  taxRateBps: number;
+  active: boolean;
+}
+
+export interface MerchantSettingsDto {
+  id: string;
+  merchantName: string;
+  locationName: string;
+  registerName: string;
+  currency: string;
+  receiptHeader: string;
+  receiptFooter: string;
+  showSkuOnReceipt: boolean;
+  discountsEnabled: boolean;
+  tipsEnabled: boolean;
+  version: number;
+  updatedAt: string;
 }
 
 export interface RuntimeStatusDto {
@@ -81,6 +108,9 @@ export interface CartLineDto {
   sku?: string;
   quantity: number;
   unitPriceMinor: AmountMinor;
+  subtotalMinor: AmountMinor;
+  discountMinor: AmountMinor;
+  taxMinor: AmountMinor;
   lineTotalMinor: AmountMinor;
 }
 
@@ -90,7 +120,9 @@ export interface CartDto {
   currency: string;
   lines: CartLineDto[];
   subtotalMinor: AmountMinor;
+  discountMinor: AmountMinor;
   taxMinor: AmountMinor;
+  tipMinor: AmountMinor;
   totalMinor: AmountMinor;
 }
 
@@ -101,7 +133,9 @@ export interface OrderDto {
   currency: string;
   lines: CartLineDto[];
   subtotalMinor: AmountMinor;
+  discountMinor: AmountMinor;
   taxMinor: AmountMinor;
+  tipMinor: AmountMinor;
   totalMinor: AmountMinor;
   createdAt?: string;
 }
@@ -155,8 +189,11 @@ export interface ReceiptDto {
   createdAt: string;
   lines: CartLineDto[];
   subtotalMinor: AmountMinor;
+  discountMinor: AmountMinor;
   taxMinor: AmountMinor;
+  tipMinor: AmountMinor;
   totalMinor: AmountMinor;
+  merchant?: MerchantSettingsDto;
   tender?: Tender;
   paymentStatus?: string;
   cardBrand?: string;
@@ -239,6 +276,7 @@ function normalizeProduct(value: unknown): ProductDto {
     sku: text(source.sku, "—"),
     ...(optionalBarcode ? { barcode: optionalBarcode } : {}),
     category: text(source.category, "Other"),
+    taxRateBps: numeric(source.taxRateBps),
     priceMinor: amount(source.priceMinor ?? source.unitPriceMinor),
     currency: text(source.currency, "USD").toUpperCase(),
     available: source.available !== false && source.active !== false
@@ -291,7 +329,11 @@ function normalizeLine(value: unknown): CartLineDto {
   const product = record(source.product);
   const quantity = numeric(source.quantity, 1);
   const unitPriceMinor = amount(source.unitPriceMinor ?? source.priceMinor ?? product.priceMinor);
-  const computedTotal = String(Math.round(Number(unitPriceMinor) * quantity));
+  const computedSubtotal = String(Math.round(Number(unitPriceMinor) * quantity));
+  const subtotalMinor = amount(source.subtotalMinor, computedSubtotal);
+  const discountMinor = amount(source.discountMinor);
+  const taxMinor = amount(source.taxMinor);
+  const computedTotal = String(Number(subtotalMinor) - Number(discountMinor) + Number(taxMinor));
   const optionalSku = optionalText(source.sku ?? product.sku);
 
   return {
@@ -301,6 +343,9 @@ function normalizeLine(value: unknown): CartLineDto {
     ...(optionalSku ? { sku: optionalSku } : {}),
     quantity,
     unitPriceMinor,
+    subtotalMinor,
+    discountMinor,
+    taxMinor,
     lineTotalMinor: amount(source.lineTotalMinor ?? source.totalMinor, computedTotal)
   };
 }
@@ -311,7 +356,9 @@ function normalizeCart(value: unknown): CartDto {
   const computedSubtotal = lines.reduce((sum, line) => sum + Number(line.lineTotalMinor), 0);
   const subtotalMinor = amount(source.subtotalMinor, String(computedSubtotal));
   const taxMinor = amount(source.taxMinor);
-  const computedTotal = String(Number(subtotalMinor) + Number(taxMinor));
+  const discountMinor = amount(source.discountMinor);
+  const tipMinor = amount(source.tipMinor);
+  const computedTotal = String(Number(subtotalMinor) - Number(discountMinor) + Number(taxMinor) + Number(tipMinor));
 
   return {
     id: text(source.id),
@@ -319,7 +366,9 @@ function normalizeCart(value: unknown): CartDto {
     currency: text(source.currency, "USD").toUpperCase(),
     lines,
     subtotalMinor,
+    discountMinor,
     taxMinor,
+    tipMinor,
     totalMinor: amount(source.totalMinor, computedTotal)
   };
 }
@@ -336,7 +385,9 @@ function normalizeOrder(value: unknown): OrderDto {
     currency: cartShape.currency,
     lines: cartShape.lines,
     subtotalMinor: cartShape.subtotalMinor,
+    discountMinor: cartShape.discountMinor,
     taxMinor: cartShape.taxMinor,
+    tipMinor: cartShape.tipMinor,
     totalMinor: cartShape.totalMinor,
     ...(optionalCreatedAt ? { createdAt: optionalCreatedAt } : {})
   };
@@ -507,6 +558,7 @@ function normalizeReceipt(value: unknown): ReceiptDto {
     ? refundStatusValue
     : "NONE";
   const refunds = Array.isArray(source.refunds) ? source.refunds.map(normalizeRefund) : [];
+  const merchant = normalizeMerchantSettings(source.merchant);
 
   return {
     orderId: text(source.orderId ?? source.id),
@@ -515,8 +567,11 @@ function normalizeReceipt(value: unknown): ReceiptDto {
     createdAt: text(source.createdAt, new Date().toISOString()),
     lines: order.lines,
     subtotalMinor: order.subtotalMinor,
+    discountMinor: order.discountMinor,
     taxMinor: order.taxMinor,
+    tipMinor: order.tipMinor,
     totalMinor: order.totalMinor,
+    ...(merchant ? { merchant } : {}),
     ...(optionalTender === "cash" || optionalTender === "card" || optionalTender === "vietnam_qr"
       ? { tender: optionalTender }
       : {}),
@@ -529,6 +584,25 @@ function normalizeReceipt(value: unknown): ReceiptDto {
     refundedMinor: amount(source.refundedMinor),
     remainingMinor: amount(source.remainingMinor, order.totalMinor),
     refunds
+  };
+}
+
+function normalizeMerchantSettings(value: unknown): MerchantSettingsDto | undefined {
+  const source = record(value);
+  if (!optionalText(source.merchantName)) return undefined;
+  return {
+    id: text(source.id, "default"),
+    merchantName: text(source.merchantName, "Open POS"),
+    locationName: text(source.locationName, "Downtown"),
+    registerName: text(source.registerName, "Register 01"),
+    currency: text(source.currency, "USD").toUpperCase(),
+    receiptHeader: text(source.receiptHeader),
+    receiptFooter: text(source.receiptFooter, "Thank you for your purchase."),
+    showSkuOnReceipt: source.showSkuOnReceipt !== false,
+    discountsEnabled: source.discountsEnabled !== false,
+    tipsEnabled: source.tipsEnabled !== false,
+    version: numeric(source.version, 1),
+    updatedAt: text(source.updatedAt, new Date().toISOString())
   };
 }
 
@@ -567,10 +641,39 @@ export const api = {
     return normalizeRuntimeStatus(await request("/v1/runtime-status"));
   },
 
-  async listProducts(): Promise<ProductDto[]> {
-    const body = await request("/v1/products");
+  async listProducts(options: { includeInactive?: boolean } = {}): Promise<ProductDto[]> {
+    const body = await request(`/v1/products${options.includeInactive ? "?includeInactive=true" : ""}`);
     const products = envelope(body, ["products"]);
     return Array.isArray(products) ? products.map(normalizeProduct).filter((product) => product.id.length > 0) : [];
+  },
+
+  async createProduct(input: ProductInputDto): Promise<ProductDto> {
+    return normalizeProduct(await request("/v1/products", {
+      method: "POST",
+      body: JSON.stringify(input)
+    }));
+  },
+
+  async updateProduct(productId: string, input: ProductInputDto): Promise<ProductDto> {
+    return normalizeProduct(await request(`/v1/products/${encodeURIComponent(productId)}`, {
+      method: "PUT",
+      body: JSON.stringify(input)
+    }));
+  },
+
+  async getMerchantSettings(): Promise<MerchantSettingsDto> {
+    const settings = normalizeMerchantSettings(await request("/v1/merchant-settings"));
+    if (!settings) throw new ApiError("Merchant settings response was invalid.", 502, "INVALID_RESPONSE");
+    return settings;
+  },
+
+  async updateMerchantSettings(input: Omit<MerchantSettingsDto, "id" | "version" | "updatedAt">): Promise<MerchantSettingsDto> {
+    const settings = normalizeMerchantSettings(await request("/v1/merchant-settings", {
+      method: "PUT",
+      body: JSON.stringify(input)
+    }));
+    if (!settings) throw new ApiError("Merchant settings response was invalid.", 502, "INVALID_RESPONSE");
+    return settings;
   },
 
   async createCart(): Promise<CartDto> {
@@ -593,6 +696,20 @@ export const api = {
       method: "DELETE"
     });
     return body === undefined ? this.getCart(cartId) : normalizeCart(body);
+  },
+
+  async applyLineDiscount(cartId: string, lineId: string, amountMinor: AmountMinor): Promise<CartDto> {
+    return normalizeCart(await request(`/v1/carts/${encodeURIComponent(cartId)}/lines/${encodeURIComponent(lineId)}/discount`, {
+      method: "PUT",
+      body: JSON.stringify({ amountMinor })
+    }));
+  },
+
+  async setCartTip(cartId: string, amountMinor: AmountMinor): Promise<CartDto> {
+    return normalizeCart(await request(`/v1/carts/${encodeURIComponent(cartId)}/tip`, {
+      method: "PUT",
+      body: JSON.stringify({ amountMinor })
+    }));
   },
 
   async checkoutCart(cartId: string, idempotencyKey: string): Promise<OrderDto> {

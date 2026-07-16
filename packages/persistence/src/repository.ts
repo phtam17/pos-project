@@ -1,6 +1,7 @@
 import type {
   AuditEntry,
   Cart,
+  MerchantSettings,
   Order,
   OutboxMessage,
   Payment,
@@ -81,6 +82,10 @@ export interface PosRepository {
   listProducts(query?: ProductQuery): Promise<readonly Product[]>;
   getProduct(id: string): Promise<Product | undefined>;
   createProduct(product: Product): Promise<Product>;
+  saveProduct(product: Product): Promise<Product>;
+
+  getMerchantSettings(): Promise<MerchantSettings>;
+  saveMerchantSettings(settings: MerchantSettings): Promise<MerchantSettings>;
 
   createCart(cart: Cart): Promise<Cart>;
   getCart(id: string): Promise<Cart | undefined>;

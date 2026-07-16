@@ -10,6 +10,8 @@ export function createSeedProducts(currency = "USD"): readonly Product[] {
       id: "product-coffee",
       sku: "COFFEE-001",
       name: "Coffee",
+      category: "Drinks",
+      barcode: "100000000001",
       unitPrice: Money.fromMinor(350n, currency),
       taxRateBps: 0
     }),
@@ -17,6 +19,8 @@ export function createSeedProducts(currency = "USD"): readonly Product[] {
       id: "product-sandwich",
       sku: "SANDWICH-001",
       name: "Sandwich",
+      category: "Food",
+      barcode: "100000000002",
       unitPrice: Money.fromMinor(950n, currency),
       taxRateBps: 0
     }),
@@ -24,6 +28,8 @@ export function createSeedProducts(currency = "USD"): readonly Product[] {
       id: "product-water",
       sku: "WATER-001",
       name: "Bottled Water",
+      category: "Drinks",
+      barcode: "100000000003",
       unitPrice: Money.fromMinor(200n, currency),
       taxRateBps: 0
     })

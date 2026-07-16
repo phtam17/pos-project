@@ -37,6 +37,7 @@ export interface OrderSnapshot {
   readonly subtotal: Money;
   readonly discountTotal: Money;
   readonly taxTotal: Money;
+  readonly tipTotal?: Money;
   readonly total: Money;
   readonly createdAt: Date;
   readonly updatedAt: Date;
@@ -65,6 +66,7 @@ export class Order {
   readonly subtotal: Money;
   readonly discountTotal: Money;
   readonly taxTotal: Money;
+  readonly tipTotal: Money;
   readonly total: Money;
   readonly createdAt: Date;
   private statusValue: OrderStatus;
@@ -85,6 +87,7 @@ export class Order {
     this.subtotal = input.subtotal;
     this.discountTotal = input.discountTotal;
     this.taxTotal = input.taxTotal;
+    this.tipTotal = input.tipTotal ?? Money.zero(this.currency);
     this.total = input.total;
     this.assertTotals();
     this.statusValue = input.status;
@@ -123,6 +126,7 @@ export class Order {
       subtotal: snapshot.subtotal,
       discountTotal: snapshot.discountTotal,
       taxTotal: snapshot.taxTotal,
+      tipTotal: snapshot.tip,
       total: snapshot.total,
       createdAt: timestamp,
       updatedAt: timestamp,
@@ -188,6 +192,7 @@ export class Order {
       subtotal: this.subtotal,
       discountTotal: this.discountTotal,
       taxTotal: this.taxTotal,
+      tipTotal: this.tipTotal,
       total: this.total,
       createdAt: new Date(this.createdAt.getTime()),
       updatedAt: this.updatedAt,
@@ -243,6 +248,11 @@ export class Order {
       tax = tax.add(line.tax);
       total = total.add(line.total);
     }
+    zero.assertSameCurrency(this.tipTotal);
+    if (this.tipTotal.isNegative()) {
+      throw new DomainValidationError("Order tip must be non-negative", "INVALID_TIP");
+    }
+    total = total.add(this.tipTotal);
     if (
       !subtotal.equals(this.subtotal) ||
       !discount.equals(this.discountTotal) ||

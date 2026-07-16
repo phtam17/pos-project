@@ -1,6 +1,7 @@
 import {
   AuditEntry,
   Cart,
+  MerchantSettings,
   Money,
   Order,
   OutboxMessage,
@@ -46,6 +47,47 @@ describe("MemoryPosRepository", () => {
         })
       )
     ).rejects.toBeInstanceOf(RepositoryConflictError);
+  });
+
+  it("persists product edits and merchant settings", async () => {
+    const repository = new MemoryPosRepository();
+    const product = productFixture();
+    await repository.createProduct(product);
+    const edited = product.withChanges({
+      sku: "EDITED-SKU",
+      name: "Edited product",
+      category: "Prepared food",
+      barcode: "123456789012",
+      unitPrice: Money.fromMinor(450n, "USD"),
+      taxRateBps: 825,
+      active: false
+    });
+    await repository.saveProduct(edited);
+    expect(await repository.getProduct(product.id)).toMatchObject({
+      category: "Prepared food",
+      barcode: "123456789012",
+      active: false
+    });
+
+    const current = await repository.getMerchantSettings();
+    const settings = current.withChanges({
+      merchantName: "Vietnam Market",
+      locationName: "Phoenix",
+      registerName: "Register A",
+      currency: "USD",
+      receiptHeader: "Sandbox",
+      receiptFooter: "Thank you",
+      showSkuOnReceipt: true,
+      discountsEnabled: true,
+      tipsEnabled: false
+    });
+    await repository.saveMerchantSettings(settings);
+    expect(await repository.getMerchantSettings()).toMatchObject({
+      merchantName: "Vietnam Market",
+      version: 2,
+      tipsEnabled: false
+    });
+    expect(MerchantSettings.rehydrate(settings.toSnapshot())).toEqual(settings);
   });
 
   it("isolates mutable carts and persists explicit saves", async () => {

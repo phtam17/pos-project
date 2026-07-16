@@ -21,6 +21,7 @@ import { ZodError, z } from "zod";
 import { loadConfig, type ApiConfig } from "./config.js";
 import {
   cartDto,
+  merchantSettingsDto,
   orderDto,
   paymentAttemptDto,
   paymentDto,
@@ -30,9 +31,11 @@ import {
 } from "./dto.js";
 import {
   addCartLineSchema,
+  cartMoneyAdjustmentSchema,
   createProductSchema,
   idempotencyKeySchema,
   identifierSchema,
+  merchantSettingsSchema,
   paymentAttemptSchema,
   refundSchema,
   sandboxVietnamQrCompletionSchema,
@@ -55,6 +58,7 @@ export interface BuildAppOptions {
 
 const cartIdParams = z.object({ id: identifierSchema });
 const cartLineParams = z.object({ id: identifierSchema, lineId: identifierSchema });
+const productIdParams = z.object({ id: identifierSchema });
 const orderIdParams = z.object({ id: identifierSchema });
 const attemptIdParams = z.object({ id: identifierSchema });
 const paymentIdParams = z.object({ id: identifierSchema });
@@ -169,10 +173,16 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     const query = z.object({
       search: z.string().trim().max(160).optional(),
       limit: z.coerce.number().int().min(1).max(500).default(500),
-      offset: z.coerce.number().int().min(0).default(0)
+      offset: z.coerce.number().int().min(0).default(0),
+      includeInactive: z.enum(["true", "false"]).default("false")
     })
       .parse(request.query);
-    const products = await service.listProducts(query.search, query.limit, query.offset);
+    const products = await service.listProducts(
+      query.search,
+      query.limit,
+      query.offset,
+      query.includeInactive !== "true"
+    );
     return {
       products: products.map(productDto),
       page: { limit: query.limit, offset: query.offset, returned: products.length }
@@ -184,6 +194,21 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     const command: CreateProductCommand = body;
     const product = await service.createProduct(command);
     return reply.code(201).send(productDto(product));
+  });
+
+  app.put("/v1/products/:id", async (request) => {
+    const { id } = productIdParams.parse(request.params);
+    const body = createProductSchema.parse(request.body);
+    return productDto(await service.updateProduct({ productId: id, ...body }));
+  });
+
+  app.get("/v1/merchant-settings", async () => {
+    return merchantSettingsDto(await service.getMerchantSettings());
+  });
+
+  app.put("/v1/merchant-settings", async (request) => {
+    const body = merchantSettingsSchema.parse(request.body);
+    return merchantSettingsDto(await service.updateMerchantSettings(body));
   });
 
   app.post("/v1/carts", async (request, reply) => {
@@ -209,6 +234,18 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   app.delete("/v1/carts/:id/lines/:lineId", async (request) => {
     const { id, lineId } = cartLineParams.parse(request.params);
     return cartDto(await service.removeCartLine(id, lineId));
+  });
+
+  app.put("/v1/carts/:id/lines/:lineId/discount", async (request) => {
+    const { id, lineId } = cartLineParams.parse(request.params);
+    const body = cartMoneyAdjustmentSchema.parse(request.body);
+    return cartDto(await service.applyCartLineDiscount(id, lineId, body.amountMinor));
+  });
+
+  app.put("/v1/carts/:id/tip", async (request) => {
+    const { id } = cartIdParams.parse(request.params);
+    const body = cartMoneyAdjustmentSchema.parse(request.body);
+    return cartDto(await service.setCartTip(id, body.amountMinor));
   });
 
   app.post("/v1/carts/:id/checkout", async (request, reply) => {
@@ -359,7 +396,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     const refunds = payments[0]
       ? await service.listRefundsForPayment(payments[0].id)
       : [];
-    return receiptDto(order, payments[0], refunds, attempt);
+    const settings = await service.getMerchantSettings();
+    return receiptDto(order, payments[0], refunds, attempt, settings);
   });
 
   app.post("/v1/providers/simulated/webhooks", async (request, reply) => {

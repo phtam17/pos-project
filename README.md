@@ -98,6 +98,22 @@ persists the same history across restarts; use the PostgreSQL setup below when y
 want to demonstrate that behavior. The manager key is only a development safeguard,
 not a substitute for staff authentication and role-based access control.
 
+## Manage the sandbox merchant
+
+Open **Manage** to maintain the demo without editing seed files:
+
+- Create and edit products, assign categories and barcodes, configure prices and
+  tax rates, and activate or deactivate catalog entries.
+- Set the store, location, register, and currency labels used by the register.
+- Customize receipt headers, footers, and SKU visibility.
+- Enable authoritative line discounts and optional tip shortcuts. Discounted
+  taxable amounts, tax, tips, checkout totals, orders, and receipts are calculated
+  by the API rather than trusted from the browser.
+
+Merchant settings and catalog edits last until restart in memory mode and persist
+across restarts in PostgreSQL mode. Changing the merchant currency affects newly
+created carts; an already-open cart keeps its original currency snapshot.
+
 ## Run with PostgreSQL
 
 ```sh

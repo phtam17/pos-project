@@ -15,9 +15,11 @@ import {
   type AmountMinor,
   type CartDto,
   type CartLineDto,
+  type MerchantSettingsDto,
   type OrderDto,
   type PaymentAttemptDto,
   type ProductDto,
+  type ProductInputDto,
   type ReceiptDto,
   type RuntimeStatusDto,
   type SaleDetailDto,
@@ -96,6 +98,7 @@ function Icon({ name, ...props }: SVGProps<SVGSVGElement> & { name: string }) {
       {name === "alert" && <><path d="M12 8v5M12 17h.01" {...common} /><path d="M10.3 4.3 2.6 18a2 2 0 0 0 1.8 3h15.2a2 2 0 0 0 1.8-3L13.7 4.3a2 2 0 0 0-3.4 0Z" {...common} /></>}
       {name === "lock" && <><rect x="5" y="10" width="14" height="11" rx="2.5" {...common} /><path d="M8 10V7a4 4 0 0 1 8 0v3" {...common} /></>}
       {name === "signal" && <><path d="M5 16.5a10 10 0 0 1 14 0M8 13a6 6 0 0 1 8 0M11 9.5a2 2 0 0 1 2 0" {...common} /><circle cx="12" cy="19" r=".75" fill="currentColor" /></>}
+      {name === "settings" && <><circle cx="12" cy="12" r="3" {...common} /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z" {...common} /></>}
     </svg>
   );
 }
@@ -212,7 +215,11 @@ function productInitials(name: string): string {
     .join("");
 }
 
-function fallbackReceipt(order: OrderDto, payment: PaymentAttemptDto): ReceiptDto {
+function fallbackReceipt(
+  order: OrderDto,
+  payment: PaymentAttemptDto,
+  settings?: MerchantSettingsDto
+): ReceiptDto {
   return {
     orderId: order.id,
     orderNumber: order.number,
@@ -220,8 +227,11 @@ function fallbackReceipt(order: OrderDto, payment: PaymentAttemptDto): ReceiptDt
     createdAt: payment.createdAt ?? order.createdAt ?? new Date().toISOString(),
     lines: order.lines,
     subtotalMinor: order.subtotalMinor,
+    discountMinor: order.discountMinor,
     taxMinor: order.taxMinor,
+    tipMinor: order.tipMinor,
     totalMinor: order.totalMinor,
+    ...(settings ? { merchant: settings } : {}),
     tender: payment.tender,
     paymentStatus: payment.status,
     refundStatus: "NONE",
@@ -271,7 +281,8 @@ function ReceiptDialog({ receipt, onClose }: { receipt: ReceiptDto; onClose: () 
 
         <div className="receipt-paper">
           <div className="receipt-brand-mark" aria-hidden="true"><span /><span /><span /><span /></div>
-          <p className="receipt-eyebrow">Open POS</p>
+          <p className="receipt-eyebrow">{receipt.merchant?.merchantName ?? "Open POS"}</p>
+          {receipt.merchant?.receiptHeader && <p className="receipt-custom-header">{receipt.merchant.receiptHeader}</p>}
           <h2 id="receipt-title">{receipt.refundStatus === "FULL" ? "Order refunded" : "Payment received"}</h2>
           <p className="receipt-subtitle">Order #{receipt.orderNumber} · {formatReceiptDate(receipt.createdAt)}</p>
 
@@ -279,7 +290,7 @@ function ReceiptDialog({ receipt, onClose }: { receipt: ReceiptDto; onClose: () 
           <div className="receipt-lines">
             {receipt.lines.map((line) => (
               <div className="receipt-line" key={line.id}>
-                <div><span>{line.quantity} × {line.name}</span><small>{formatMoney(line.unitPriceMinor, receipt.currency)} each</small></div>
+                <div><span>{line.quantity} × {line.name}</span><small>{receipt.merchant?.showSkuOnReceipt && line.sku ? `${line.sku} · ` : ""}{formatMoney(line.unitPriceMinor, receipt.currency)} each{BigInt(line.discountMinor) > 0n ? ` · −${formatMoney(line.discountMinor, receipt.currency)} discount` : ""}</small></div>
                 <strong>{formatMoney(line.lineTotalMinor, receipt.currency)}</strong>
               </div>
             ))}
@@ -288,7 +299,9 @@ function ReceiptDialog({ receipt, onClose }: { receipt: ReceiptDto; onClose: () 
 
           <dl className="receipt-totals">
             <div><dt>Subtotal</dt><dd>{formatMoney(receipt.subtotalMinor, receipt.currency)}</dd></div>
+            {BigInt(receipt.discountMinor) > 0n && <div className="receipt-discount"><dt>Discounts</dt><dd>−{formatMoney(receipt.discountMinor, receipt.currency)}</dd></div>}
             <div><dt>Tax</dt><dd>{formatMoney(receipt.taxMinor, receipt.currency)}</dd></div>
+            {BigInt(receipt.tipMinor) > 0n && <div><dt>Tip</dt><dd>{formatMoney(receipt.tipMinor, receipt.currency)}</dd></div>}
             <div className="receipt-grand-total"><dt>Total</dt><dd>{formatMoney(receipt.totalMinor, receipt.currency)}</dd></div>
             {receipt.refundStatus !== "NONE" && (
               <div className="receipt-refunded"><dt>Refunded</dt><dd>−{formatMoney(receipt.refundedMinor, receipt.currency)}</dd></div>
@@ -315,7 +328,7 @@ function ReceiptDialog({ receipt, onClose }: { receipt: ReceiptDto; onClose: () 
               <PaymentTimeline details={receipt.vietnamQr} compact />
             </div>
           )}
-          <p className="receipt-thanks">{receipt.refundStatus === "FULL" ? "This sale has been fully refunded." : "Thank you for your purchase."}</p>
+          <p className="receipt-thanks">{receipt.refundStatus === "FULL" ? "This sale has been fully refunded." : receipt.merchant?.receiptFooter || "Thank you for your purchase."}</p>
         </div>
       </section>
     </div>
@@ -489,20 +502,22 @@ function CartLine({
   currency,
   disabled,
   onAdd,
-  onRemove
+  onRemove,
+  onDiscount
 }: {
   line: CartLineDto;
   currency: string;
   disabled: boolean;
   onAdd: () => void;
   onRemove: () => void;
+  onDiscount?: () => void;
 }) {
   return (
     <li className="cart-line">
       <div className="cart-line-main">
         <div>
           <strong>{line.name}</strong>
-          <span>{formatMoney(line.unitPriceMinor, currency)} each</span>
+          <span>{formatMoney(line.unitPriceMinor, currency)} each{BigInt(line.discountMinor) > 0n ? ` · ${formatMoney(line.discountMinor, currency)} off` : ""}</span>
         </div>
         <strong className="line-total">{formatMoney(line.lineTotalMinor, currency)}</strong>
       </div>
@@ -511,11 +526,56 @@ function CartLine({
         <button type="button" onClick={onAdd} disabled={disabled} aria-label={`Add another ${line.name}`}>
           <Icon name="plus" />
         </button>
+        {onDiscount && <button className={`discount-line ${BigInt(line.discountMinor) > 0n ? "active" : ""}`} type="button" onClick={onDiscount} disabled={disabled}>Discount</button>}
         <button className="remove-line" type="button" onClick={onRemove} disabled={disabled} aria-label={`Remove ${line.name} from cart`}>
           <Icon name="trash" />
         </button>
       </div>
     </li>
+  );
+}
+
+function DiscountDialog({
+  line,
+  currency,
+  busy,
+  onClose,
+  onApply
+}: {
+  line: CartLineDto;
+  currency: string;
+  busy: boolean;
+  onClose: () => void;
+  onApply: (amountMinor: string) => void;
+}) {
+  const [value, setValue] = useState(() => minorToInput(line.discountMinor));
+  const [error, setError] = useState<string | null>(null);
+  const amount = inputToMinor(value);
+  const maximum = BigInt(line.subtotalMinor);
+
+  const submit = () => {
+    if (amount === null || amount < 0n || amount > maximum) {
+      setError(`Enter an amount from ${formatMoney("0", currency)} through ${formatMoney(line.subtotalMinor, currency)}.`);
+      return;
+    }
+    onApply(amount.toString());
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
+      if (event.target === event.currentTarget && !busy) onClose();
+    }}>
+      <section className="discount-modal" role="dialog" aria-modal="true" aria-labelledby="discount-title">
+        <div className="refund-modal-heading"><div><p className="eyebrow">Current cart</p><h2 id="discount-title">Discount {line.name}</h2></div><button className="icon-button" type="button" onClick={onClose} disabled={busy} aria-label="Close discount dialog"><Icon name="close" /></button></div>
+        <p>Line subtotal: <strong>{formatMoney(line.subtotalMinor, currency)}</strong>. Tax will be recalculated from the discounted amount.</p>
+        <div className="refund-amount-shortcuts">
+          {[0, 10, 20, 50].map((percent) => <button type="button" key={percent} disabled={busy} onClick={() => setValue(minorToInput((maximum * BigInt(percent) / 100n).toString()))}>{percent === 0 ? "Remove" : `${percent}% off`}</button>)}
+        </div>
+        <label className="field-label">Discount amount ({currency})<input type="text" inputMode="decimal" value={value} onChange={(event) => setValue(event.target.value)} disabled={busy} /></label>
+        {error && <div className="refund-error" role="alert"><Icon name="alert" />{error}</div>}
+        <div className="refund-modal-actions"><button type="button" onClick={onClose} disabled={busy}>Cancel</button><button className="save-management" type="button" onClick={submit} disabled={busy}>{busy ? <span className="spinner" /> : <Icon name="check" />} Apply discount</button></div>
+      </section>
+    </div>
   );
 }
 
@@ -752,7 +812,7 @@ function OrdersView({
             <div className="order-detail-heading"><div><p className="eyebrow">Order detail</p><h2>#{detail.order.number}</h2></div><span className={`status-badge status-${detail.order.status.toLocaleLowerCase()}`}>{orderStatusLabel(detail.order.status)}</span></div>
             <p className="order-detail-date">Created {formatReceiptDate(detail.order.createdAt ?? "")}</p>
             <div className="detail-section"><h3>Items</h3>{detail.order.lines.map((line) => <div className="detail-line" key={line.id}><span>{line.quantity} × {line.name}<small>{line.sku}</small></span><strong>{formatMoney(line.lineTotalMinor, detail.order.currency)}</strong></div>)}</div>
-            <dl className="detail-totals"><div><dt>Subtotal</dt><dd>{formatMoney(detail.order.subtotalMinor, detail.order.currency)}</dd></div><div><dt>Tax</dt><dd>{formatMoney(detail.order.taxMinor, detail.order.currency)}</dd></div><div className="detail-total"><dt>Original total</dt><dd>{formatMoney(detail.order.totalMinor, detail.order.currency)}</dd></div>{BigInt(detail.refundedMinor) > 0n && <div className="detail-refunded"><dt>Refunded</dt><dd>−{formatMoney(detail.refundedMinor, detail.order.currency)}</dd></div>}<div className="detail-net"><dt>Net paid</dt><dd>{formatMoney(detail.remainingMinor, detail.order.currency)}</dd></div></dl>
+            <dl className="detail-totals"><div><dt>Subtotal</dt><dd>{formatMoney(detail.order.subtotalMinor, detail.order.currency)}</dd></div>{BigInt(detail.order.discountMinor) > 0n && <div className="discount-total"><dt>Discounts</dt><dd>−{formatMoney(detail.order.discountMinor, detail.order.currency)}</dd></div>}<div><dt>Tax</dt><dd>{formatMoney(detail.order.taxMinor, detail.order.currency)}</dd></div>{BigInt(detail.order.tipMinor) > 0n && <div><dt>Tip</dt><dd>{formatMoney(detail.order.tipMinor, detail.order.currency)}</dd></div>}<div className="detail-total"><dt>Original total</dt><dd>{formatMoney(detail.order.totalMinor, detail.order.currency)}</dd></div>{BigInt(detail.refundedMinor) > 0n && <div className="detail-refunded"><dt>Refunded</dt><dd>−{formatMoney(detail.refundedMinor, detail.order.currency)}</dd></div>}<div className="detail-net"><dt>Net paid</dt><dd>{formatMoney(detail.remainingMinor, detail.order.currency)}</dd></div></dl>
             <div className="detail-section"><h3>Payment</h3>{payment ? <div className="payment-detail"><span className="activity-icon success"><Icon name="card" /></span><span><strong>{tenderLabel(payment)}</strong><small>{payment.provider ?? "sandbox"} · {payment.status.toLocaleLowerCase()}</small></span><b>{formatMoney(payment.amountMinor, detail.order.currency)}</b></div> : <p className="detail-muted">No captured payment is attached to this order.</p>}</div>
             {payment?.vietnamQr && <div className="detail-section qr-history-section"><VietnamQrQuoteCard details={payment.vietnamQr} currency={detail.order.currency} /><PaymentTimeline details={payment.vietnamQr} /></div>}
             {detail.refunds.length > 0 && <div className="detail-section"><h3>Refund history</h3><div className="refund-history">{detail.refunds.map((refund) => <div key={refund.id}><span><strong>{formatMoney(refund.amountMinor, refund.currency)}</strong><small>{formatReceiptDate(refund.createdAt)}</small></span><span className={`status-badge status-${refund.status.toLocaleLowerCase()}`}>{orderStatusLabel(refund.status)}</span></div>)}</div></div>}
@@ -766,10 +826,191 @@ function OrdersView({
   );
 }
 
-export function App() {
-  const [activeView, setActiveView] = useState<"checkout" | "orders">("checkout");
+interface ProductDraft {
+  id?: string;
+  sku: string;
+  name: string;
+  category: string;
+  barcode: string;
+  price: string;
+  taxPercent: string;
+  active: boolean;
+}
+
+function blankProduct(currency: string): ProductDraft {
+  void currency;
+  return { sku: "", name: "", category: "Other", barcode: "", price: "0.00", taxPercent: "0", active: true };
+}
+
+function draftFromProduct(product: ProductDto): ProductDraft {
+  return {
+    id: product.id,
+    sku: product.sku,
+    name: product.name,
+    category: product.category,
+    barcode: product.barcode ?? "",
+    price: minorToInput(product.priceMinor),
+    taxPercent: (product.taxRateBps / 100).toString(),
+    active: product.available
+  };
+}
+
+function ManagementView({
+  settings,
+  onSettingsChanged,
+  onCatalogChanged,
+  onNotice
+}: {
+  settings: MerchantSettingsDto;
+  onSettingsChanged: (settings: MerchantSettingsDto) => void;
+  onCatalogChanged: (products: ProductDto[]) => void;
+  onNotice: (message: string) => void;
+}) {
+  const [tab, setTab] = useState<"products" | "store">("products");
   const [products, setProducts] = useState<ProductDto[]>([]);
+  const [productSearch, setProductSearch] = useState("");
+  const [draft, setDraft] = useState<ProductDraft>(() => blankProduct(settings.currency));
+  const [storeDraft, setStoreDraft] = useState(settings);
+  const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadProducts = async () => {
+    setLoading(true);
+    try {
+      const next = await api.listProducts({ includeInactive: true });
+      setProducts(next);
+      return next;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    let active = true;
+    void api.listProducts({ includeInactive: true }).then((next) => {
+      if (active) setProducts(next);
+    }).catch((cause) => {
+      if (active) setError(errorMessage(cause));
+    }).finally(() => {
+      if (active) setLoading(false);
+    });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => setStoreDraft(settings), [settings]);
+
+  const categories = useMemo(() => Array.from(new Set(products.map((product) => product.category))).sort(), [products]);
+  const filtered = useMemo(() => {
+    const query = productSearch.trim().toLocaleLowerCase();
+    if (!query) return products;
+    return products.filter((product) => [product.name, product.sku, product.category, product.barcode ?? ""].some((value) => value.toLocaleLowerCase().includes(query)));
+  }, [productSearch, products]);
+
+  const saveProduct = async () => {
+    const priceMinor = inputToMinor(draft.price);
+    const taxPercent = Number(draft.taxPercent);
+    if (!draft.name.trim() || !draft.sku.trim() || !draft.category.trim()) {
+      setError("Name, SKU, and category are required.");
+      return;
+    }
+    if (priceMinor === null || priceMinor <= 0n) {
+      setError("Enter a product price greater than zero.");
+      return;
+    }
+    if (!Number.isFinite(taxPercent) || taxPercent < 0 || taxPercent > 1000) {
+      setError("Tax must be between 0% and 1000%.");
+      return;
+    }
+    const input: ProductInputDto = {
+      sku: draft.sku.trim(),
+      name: draft.name.trim(),
+      category: draft.category.trim(),
+      ...(draft.barcode.trim() ? { barcode: draft.barcode.trim() } : { barcode: null }),
+      priceMinor: priceMinor.toString(),
+      currency: settings.currency,
+      taxRateBps: Math.round(taxPercent * 100),
+      active: draft.active
+    };
+    setBusy(true);
+    setError(null);
+    try {
+      const saved = draft.id
+        ? await api.updateProduct(draft.id, input)
+        : await api.createProduct(input);
+      const next = await loadProducts();
+      onCatalogChanged(next.filter((product) => product.available));
+      setDraft(draftFromProduct(saved));
+      onNotice(draft.id ? "Product changes saved." : "Product created and added to the catalog.");
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveStore = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const saved = await api.updateMerchantSettings({
+        merchantName: storeDraft.merchantName,
+        locationName: storeDraft.locationName,
+        registerName: storeDraft.registerName,
+        currency: storeDraft.currency,
+        receiptHeader: storeDraft.receiptHeader,
+        receiptFooter: storeDraft.receiptFooter,
+        showSkuOnReceipt: storeDraft.showSkuOnReceipt,
+        discountsEnabled: storeDraft.discountsEnabled,
+        tipsEnabled: storeDraft.tipsEnabled
+      });
+      onSettingsChanged(saved);
+      onNotice("Merchant and receipt settings saved.");
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <main className="management-page">
+      <section className="management-panel">
+        <div className="management-heading"><div><p className="eyebrow">Merchant workspace</p><h1>Manage</h1><p>Edit the sandbox catalog, tax behavior, register identity, and receipt options.</p></div></div>
+        <div className="management-tabs" role="tablist"><button className={tab === "products" ? "active" : ""} type="button" role="tab" aria-selected={tab === "products"} onClick={() => setTab("products")}>Products & categories</button><button className={tab === "store" ? "active" : ""} type="button" role="tab" aria-selected={tab === "store"} onClick={() => setTab("store")}>Store & receipts</button></div>
+        {error && <div className="error-banner" role="alert"><Icon name="alert" /><span>{error}</span><button type="button" onClick={() => setError(null)}>Dismiss</button></div>}
+        {tab === "products" ? (
+          <div className="product-management-grid">
+            <div className="product-admin-list">
+              <div className="product-admin-toolbar"><div className="order-search"><Icon name="search" /><input aria-label="Search managed products" type="search" value={productSearch} onChange={(event) => setProductSearch(event.target.value)} placeholder="Search products" /></div><button type="button" onClick={() => setDraft(blankProduct(settings.currency))}><Icon name="plus" />New</button></div>
+              {loading ? <div className="orders-loading"><span className="spinner" />Loading catalog</div> : <div className="managed-products">{filtered.map((product) => <button className={draft.id === product.id ? "selected" : ""} type="button" key={product.id} onClick={() => setDraft(draftFromProduct(product))}><span className={`product-swatch tone-${products.indexOf(product) % 6}`}>{productInitials(product.name)}</span><span><strong>{product.name}</strong><small>{product.sku} · {product.category}</small></span><span><b>{formatMoney(product.priceMinor, product.currency)}</b><small className={product.available ? "active" : "inactive"}>{product.available ? "Active" : "Inactive"}</small></span></button>)}</div>}
+            </div>
+            <form className="management-form" onSubmit={(event) => { event.preventDefault(); void saveProduct(); }}>
+              <div className="management-form-title"><div><p className="eyebrow">{draft.id ? "Edit product" : "New product"}</p><h2>{draft.id ? draft.name : "Create a product"}</h2></div>{draft.id && <button type="button" onClick={() => setDraft(blankProduct(settings.currency))}>Clear</button>}</div>
+              <div className="form-grid"><label className="field-label">Product name<input value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} maxLength={160} disabled={busy} /></label><label className="field-label">SKU<input value={draft.sku} onChange={(event) => setDraft((current) => ({ ...current, sku: event.target.value }))} maxLength={64} disabled={busy} /></label><label className="field-label">Category<input list="product-categories" value={draft.category} onChange={(event) => setDraft((current) => ({ ...current, category: event.target.value }))} maxLength={80} disabled={busy} /><datalist id="product-categories">{categories.map((value) => <option value={value} key={value} />)}</datalist></label><label className="field-label">Barcode<input value={draft.barcode} onChange={(event) => setDraft((current) => ({ ...current, barcode: event.target.value }))} maxLength={80} disabled={busy} /></label><label className="field-label">Price ({settings.currency})<input type="text" inputMode="decimal" value={draft.price} onChange={(event) => setDraft((current) => ({ ...current, price: event.target.value }))} disabled={busy} /></label><label className="field-label">Tax rate (%)<input type="number" min="0" max="1000" step="0.01" value={draft.taxPercent} onChange={(event) => setDraft((current) => ({ ...current, taxPercent: event.target.value }))} disabled={busy} /></label></div>
+              <label className="toggle-field"><input type="checkbox" checked={draft.active} onChange={(event) => setDraft((current) => ({ ...current, active: event.target.checked }))} disabled={busy} /><span><strong>Active product</strong><small>Inactive products remain in history but cannot be added to a new cart.</small></span></label>
+              <button className="save-management" type="submit" disabled={busy}>{busy ? <span className="spinner" /> : <Icon name="check" />}{draft.id ? "Save product" : "Create product"}</button>
+            </form>
+          </div>
+        ) : (
+          <form className="store-settings-form" onSubmit={(event) => { event.preventDefault(); void saveStore(); }}>
+            <section><p className="eyebrow">Register identity</p><h2>Store details</h2><div className="form-grid three"><label className="field-label">Store name<input value={storeDraft.merchantName} onChange={(event) => setStoreDraft((current) => ({ ...current, merchantName: event.target.value }))} disabled={busy} /></label><label className="field-label">Location name<input value={storeDraft.locationName} onChange={(event) => setStoreDraft((current) => ({ ...current, locationName: event.target.value }))} disabled={busy} /></label><label className="field-label">Register name<input value={storeDraft.registerName} onChange={(event) => setStoreDraft((current) => ({ ...current, registerName: event.target.value }))} disabled={busy} /></label><label className="field-label">Currency<input value={storeDraft.currency} maxLength={3} onChange={(event) => setStoreDraft((current) => ({ ...current, currency: event.target.value.toUpperCase() }))} disabled={busy} /></label></div></section>
+            <section><p className="eyebrow">Printed output</p><h2>Receipt settings</h2><div className="form-grid"><label className="field-label">Receipt header<input value={storeDraft.receiptHeader} onChange={(event) => setStoreDraft((current) => ({ ...current, receiptHeader: event.target.value }))} maxLength={240} disabled={busy} /></label><label className="field-label">Receipt footer<input value={storeDraft.receiptFooter} onChange={(event) => setStoreDraft((current) => ({ ...current, receiptFooter: event.target.value }))} maxLength={240} disabled={busy} /></label></div></section>
+            <section className="settings-toggles"><label className="toggle-field"><input type="checkbox" checked={storeDraft.showSkuOnReceipt} onChange={(event) => setStoreDraft((current) => ({ ...current, showSkuOnReceipt: event.target.checked }))} /><span><strong>Show SKU on receipts</strong><small>Useful for demonstrations and item lookup.</small></span></label><label className="toggle-field"><input type="checkbox" checked={storeDraft.discountsEnabled} onChange={(event) => setStoreDraft((current) => ({ ...current, discountsEnabled: event.target.checked }))} /><span><strong>Enable line discounts</strong><small>Discounts recalculate taxable amounts on the API.</small></span></label><label className="toggle-field"><input type="checkbox" checked={storeDraft.tipsEnabled} onChange={(event) => setStoreDraft((current) => ({ ...current, tipsEnabled: event.target.checked }))} /><span><strong>Enable tips</strong><small>Show tip shortcuts before tendering.</small></span></label></section>
+            <button className="save-management" type="submit" disabled={busy}>{busy ? <span className="spinner" /> : <Icon name="check" />}Save merchant settings</button>
+          </form>
+        )}
+      </section>
+    </main>
+  );
+}
+
+export function App() {
+  const [activeView, setActiveView] = useState<"checkout" | "orders" | "manage">("checkout");
+  const [products, setProducts] = useState<ProductDto[]>([]);
+  const [settings, setSettings] = useState<MerchantSettingsDto | null>(null);
   const [cart, setCart] = useState<CartDto | null>(null);
+  const [discountLine, setDiscountLine] = useState<CartLineDto | null>(null);
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search);
   const [category, setCategory] = useState("All");
@@ -795,13 +1036,15 @@ export function App() {
     setLoading(true);
     setPageError(null);
     try {
-      const [nextProducts, nextCart, persistedOrders] = await Promise.all([
+      const [nextProducts, nextCart, persistedOrders, nextSettings] = await Promise.all([
         api.listProducts(),
         api.createCart(),
-        api.listOrders({ limit: 12 })
+        api.listOrders({ limit: 12 }),
+        api.getMerchantSettings()
       ]);
       setProducts(nextProducts);
       setCart(nextCart);
+      setSettings(nextSettings);
       setRecentSales(
         persistedOrders
           .filter((order) => order.status === "PAID" || order.status === "REFUNDED")
@@ -912,8 +1155,38 @@ export function App() {
     }
   };
 
+  const applyDiscount = async (amountMinor: string) => {
+    if (!cart || !discountLine || cartBusy || saleLocked) return;
+    setCartBusy(true);
+    setPageError(null);
+    try {
+      setCart(await api.applyLineDiscount(cart.id, discountLine.id, amountMinor));
+      setDiscountLine(null);
+      setNotice(amountMinor === "0" ? "Line discount removed." : "Line discount applied and tax recalculated.");
+    } catch (error) {
+      setPageError(errorMessage(error));
+    } finally {
+      setCartBusy(false);
+    }
+  };
+
+  const setTipPercent = async (basisPoints: number) => {
+    if (!cart || cartBusy || saleLocked) return;
+    const discountedSubtotal = BigInt(cart.subtotalMinor) - BigInt(cart.discountMinor);
+    const amountMinor = ((discountedSubtotal * BigInt(basisPoints) + 5_000n) / 10_000n).toString();
+    setCartBusy(true);
+    setPageError(null);
+    try {
+      setCart(await api.setCartTip(cart.id, amountMinor));
+    } catch (error) {
+      setPageError(errorMessage(error));
+    } finally {
+      setCartBusy(false);
+    }
+  };
+
   const completePayment = async (pending: PendingPayment, payment: PaymentAttemptDto) => {
-    const fallback = fallbackReceipt(pending.order, payment);
+    const fallback = fallbackReceipt(pending.order, payment, settings ?? undefined);
     let finalReceipt = fallback;
     try {
       finalReceipt = await api.getReceipt(pending.order.id);
@@ -1186,12 +1459,13 @@ export function App() {
       <header className="topbar">
         <div className="brand">
           <div className="brand-mark" aria-hidden="true"><span /><span /><span /><span /></div>
-          <div><strong>Open POS</strong><span>Downtown · Register 01</span></div>
+          <div><strong>{settings?.merchantName ?? "Open POS"}</strong><span>{settings?.locationName ?? "Downtown"} · {settings?.registerName ?? "Register 01"}</span></div>
         </div>
 
         <nav className="main-nav" aria-label="Register sections">
           <button className={`nav-item ${activeView === "checkout" ? "active" : ""}`} type="button" onClick={() => setActiveView("checkout")} aria-current={activeView === "checkout" ? "page" : undefined}><Icon name="card" />Checkout</button>
           <button className={`nav-item ${activeView === "orders" ? "active" : ""}`} type="button" onClick={() => setActiveView("orders")} aria-current={activeView === "orders" ? "page" : undefined}><Icon name="orders" />Orders</button>
+          <button className={`nav-item ${activeView === "manage" ? "active" : ""}`} type="button" onClick={() => setActiveView("manage")} aria-current={activeView === "manage" ? "page" : undefined}><Icon name="settings" />Manage</button>
         </nav>
 
         <div className="register-health">
@@ -1314,7 +1588,7 @@ export function App() {
 
         <aside className="cart-panel" aria-labelledby="cart-title" aria-busy={cartBusy || paymentBusy}>
           <div className="cart-header">
-            <div><p className="eyebrow">Register 01</p><h2 id="cart-title">Current cart</h2></div>
+            <div><p className="eyebrow">{settings?.registerName ?? "Register 01"}</p><h2 id="cart-title">Current cart</h2></div>
             <span className="cart-count">{cart?.lines.reduce((sum, line) => sum + line.quantity, 0) ?? 0} items</span>
           </div>
 
@@ -1338,6 +1612,7 @@ export function App() {
                       if (product) void addProduct(product);
                     }}
                     onRemove={() => void removeLine(line)}
+                    {...(settings?.discountsEnabled ? { onDiscount: () => setDiscountLine(line) } : {})}
                   />
                 ))}
               </ul>
@@ -1347,9 +1622,19 @@ export function App() {
           <div className="checkout-area">
             <dl className="totals">
               <div><dt>Subtotal</dt><dd>{formatMoney(cart?.subtotalMinor ?? "0", cart?.currency)}</dd></div>
+              {cart && BigInt(cart.discountMinor) > 0n && <div className="discount-total"><dt>Discounts</dt><dd>−{formatMoney(cart.discountMinor, cart.currency)}</dd></div>}
               <div><dt>Tax</dt><dd>{formatMoney(cart?.taxMinor ?? "0", cart?.currency)}</dd></div>
+              {cart && BigInt(cart.tipMinor) > 0n && <div><dt>Tip</dt><dd>{formatMoney(cart.tipMinor, cart.currency)}</dd></div>}
               <div className="grand-total"><dt>Total</dt><dd>{formatMoney(cart?.totalMinor ?? "0", cart?.currency)}</dd></div>
             </dl>
+
+            {paymentState.phase === "idle" && settings?.tipsEnabled && cart && cart.lines.length > 0 && (
+              <div className="tip-selector"><span>Add tip</span><div>{[0, 1000, 1500, 2000].map((basisPoints) => {
+                const base = BigInt(cart.subtotalMinor) - BigInt(cart.discountMinor);
+                const amount = (base * BigInt(basisPoints) + 5_000n) / 10_000n;
+                return <button className={BigInt(cart.tipMinor) === amount ? "active" : ""} type="button" key={basisPoints} disabled={cartBusy || saleLocked} onClick={() => void setTipPercent(basisPoints)}>{basisPoints === 0 ? "No tip" : `${basisPoints / 100}%`}</button>;
+              })}</div></div>
+            )}
 
             {paymentState.phase !== "idle" && (
               <div className={`payment-status status-${paymentState.phase}`} role="status" aria-live="polite">
@@ -1411,10 +1696,11 @@ export function App() {
             </div>
           </div>
         </aside>
-      </main> : <OrdersView onShowReceipt={setReceipt} onNotice={setNotice} />}
+      </main> : activeView === "orders" ? <OrdersView onShowReceipt={setReceipt} onNotice={setNotice} /> : settings ? <ManagementView settings={settings} onSettingsChanged={setSettings} onCatalogChanged={setProducts} onNotice={setNotice} /> : <main className="management-page"><div className="orders-loading"><span className="spinner" />Loading merchant settings</div></main>}
 
       {notice && <div className="toast" role="status"><Icon name="alert" /><span>{notice}</span><button type="button" onClick={() => setNotice(null)} aria-label="Dismiss notification"><Icon name="close" /></button></div>}
       {receipt && <ReceiptDialog receipt={receipt} onClose={() => setReceipt(null)} />}
+      {discountLine && cart && <DiscountDialog line={discountLine} currency={cart.currency} busy={cartBusy} onClose={() => setDiscountLine(null)} onApply={(amountMinor) => void applyDiscount(amountMinor)} />}
     </div>
   );
 }

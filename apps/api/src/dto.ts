@@ -1,5 +1,6 @@
 import type {
   Cart,
+  MerchantSettings,
   Order,
   Payment,
   PaymentAttempt,
@@ -18,7 +19,8 @@ export function productDto(product: Product): Record<string, unknown> {
     id: product.id,
     sku: product.sku,
     name: product.name,
-    category: "Other",
+    category: product.category,
+    barcode: product.barcode,
     priceMinor: amount(product.unitPrice),
     currency: product.unitPrice.currency,
     taxRateBps: product.taxRateBps,
@@ -48,6 +50,7 @@ export function cartDto(cart: Cart): Record<string, unknown> {
     subtotalMinor: amount(cart.subtotal),
     discountMinor: amount(cart.discountTotal),
     taxMinor: amount(cart.taxTotal),
+    tipMinor: amount(cart.tip),
     totalMinor: amount(cart.total),
     createdAt: cart.createdAt.toISOString(),
     updatedAt: cart.updatedAt.toISOString()
@@ -78,6 +81,7 @@ export function orderDto(order: Order): Record<string, unknown> {
     subtotalMinor: amount(order.subtotal),
     discountMinor: amount(order.discountTotal),
     taxMinor: amount(order.taxTotal),
+    tipMinor: amount(order.tipTotal),
     totalMinor: amount(order.total),
     createdAt: order.createdAt.toISOString(),
     updatedAt: order.updatedAt.toISOString(),
@@ -204,7 +208,8 @@ export function receiptDto(
   order: Order,
   payment?: Payment,
   refunds: readonly Refund[] = [],
-  attempt?: PaymentAttempt
+  attempt?: PaymentAttempt,
+  settings?: MerchantSettings
 ): Record<string, unknown> {
   const dto = orderDto(order);
   const succeededRefunds = refunds.filter((refund) => refund.status === "SUCCEEDED");
@@ -228,6 +233,7 @@ export function receiptDto(
   const wallet = vietnamQr?.selectedWallet;
   return {
     ...dto,
+    merchant: settings ? merchantSettingsDto(settings) : undefined,
     orderId: order.id,
     createdAt: payment?.capturedAt.toISOString() ?? new Date().toISOString(),
     issuedAt: payment?.capturedAt.toISOString() ?? new Date().toISOString(),
@@ -254,6 +260,23 @@ export function receiptDto(
     last4: payment?.card?.last4,
     ...(wallet ? { wallet } : {}),
     ...(vietnamQr ? { vietnamQr: vietnamQrDto(vietnamQr) } : {})
+  };
+}
+
+export function merchantSettingsDto(settings: MerchantSettings): Record<string, unknown> {
+  return {
+    id: settings.id,
+    merchantName: settings.merchantName,
+    locationName: settings.locationName,
+    registerName: settings.registerName,
+    currency: settings.currency,
+    receiptHeader: settings.receiptHeader,
+    receiptFooter: settings.receiptFooter,
+    showSkuOnReceipt: settings.showSkuOnReceipt,
+    discountsEnabled: settings.discountsEnabled,
+    tipsEnabled: settings.tipsEnabled,
+    version: settings.version,
+    updatedAt: settings.updatedAt.toISOString()
   };
 }
 

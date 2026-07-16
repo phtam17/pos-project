@@ -1,6 +1,7 @@
 export * from "./cart.js";
 export * from "./errors.js";
 export * from "./ids.js";
+export * from "./merchant-settings.js";
 export * from "./money.js";
 export * from "./operations.js";
 export * from "./order.js";

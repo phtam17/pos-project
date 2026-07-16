@@ -177,6 +177,7 @@ export interface CartSnapshot {
   readonly subtotal: Money;
   readonly discountTotal: Money;
   readonly taxTotal: Money;
+  readonly tip: Money;
   readonly total: Money;
   readonly createdAt: Date;
   readonly updatedAt: Date;
@@ -188,6 +189,7 @@ export interface CartInput {
   readonly status?: CartStatus;
   readonly currency: string;
   readonly lines?: readonly CartLineSnapshot[];
+  readonly tip?: Money;
   readonly createdAt?: Date;
   readonly updatedAt?: Date;
   /** New carts start at version 1, matching the persistence schema. */
@@ -204,12 +206,19 @@ export class Cart {
   private statusValue: CartStatus;
   private updatedAtValue: Date;
   private versionValue: number;
+  private tipValue: Money;
   private readonly lineMap = new Map<CartLineId, CartLine>();
 
   constructor(input: CartInput) {
     this.id = requireNonEmpty(input.id, "cart.id");
     this.statusValue = input.status ?? "OPEN";
     this.currency = Money.zero(input.currency).currency;
+    const tip = input.tip ?? Money.zero(this.currency);
+    this.assertCurrency(tip);
+    if (tip.isNegative()) {
+      throw new DomainValidationError("cart.tip must be non-negative", "INVALID_TIP");
+    }
+    this.tipValue = tip;
     const createdAt = copyDate(input.createdAt ?? new Date(), "cart.createdAt");
     const updatedAt = copyDate(input.updatedAt ?? createdAt, "cart.updatedAt");
     if (updatedAt.getTime() < createdAt.getTime()) {
@@ -248,6 +257,7 @@ export class Cart {
       !cart.subtotal.equals(snapshot.subtotal) ||
       !cart.discountTotal.equals(snapshot.discountTotal) ||
       !cart.taxTotal.equals(snapshot.taxTotal) ||
+      !cart.tip.equals(snapshot.tip ?? Money.zero(cart.currency)) ||
       !cart.total.equals(snapshot.total)
     ) {
       throw new DomainValidationError(
@@ -286,8 +296,12 @@ export class Cart {
     return this.sum((line) => line.tax);
   }
 
+  get tip(): Money {
+    return this.tipValue;
+  }
+
   get total(): Money {
-    return this.sum((line) => line.total);
+    return this.sum((line) => line.total).add(this.tipValue);
   }
 
   addProduct(
@@ -342,6 +356,16 @@ export class Cart {
     return updated;
   }
 
+  setTip(tip: Money, at: Date = new Date()): void {
+    this.assertOpen();
+    this.assertCurrency(tip);
+    if (tip.isNegative()) {
+      throw new DomainValidationError("cart.tip must be non-negative", "INVALID_TIP");
+    }
+    this.tipValue = tip;
+    this.touch(at);
+  }
+
   removeLine(lineId: CartLineId, at: Date = new Date()): void {
     this.assertOpen();
     if (!this.lineMap.delete(lineId)) {
@@ -356,6 +380,7 @@ export class Cart {
   clear(at: Date = new Date()): void {
     this.assertOpen();
     this.lineMap.clear();
+    this.tipValue = Money.zero(this.currency);
     this.touch(at);
   }
 
@@ -377,6 +402,7 @@ export class Cart {
       subtotal: this.subtotal,
       discountTotal: this.discountTotal,
       taxTotal: this.taxTotal,
+      tip: this.tip,
       total: this.total,
       createdAt: new Date(this.createdAt.getTime()),
       updatedAt: this.updatedAt,

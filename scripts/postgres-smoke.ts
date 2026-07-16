@@ -25,7 +25,40 @@ const app = await buildApp({
   }
 });
 
+interface MerchantSettingsPayload {
+  merchantName: string;
+  locationName: string;
+  registerName: string;
+  currency: string;
+  receiptHeader: string;
+  receiptFooter: string;
+  showSkuOnReceipt: boolean;
+  discountsEnabled: boolean;
+  tipsEnabled: boolean;
+}
+
+let originalMerchantSettings: MerchantSettingsPayload | undefined;
+
 try {
+  const originalMerchantResponse = await app.inject({ method: "GET", url: "/v1/merchant-settings" });
+  assert.equal(originalMerchantResponse.statusCode, 200, originalMerchantResponse.body);
+  originalMerchantSettings = originalMerchantResponse.json<MerchantSettingsPayload>();
+  const merchantResponse = await app.inject({
+    method: "PUT",
+    url: "/v1/merchant-settings",
+    payload: {
+      merchantName: "Open POS PostgreSQL Demo",
+      locationName: "Downtown",
+      registerName: "Register 01",
+      currency: "USD",
+      receiptHeader: "Durable sandbox demonstration",
+      receiptFooter: "Thank you for testing Open POS.",
+      showSkuOnReceipt: true,
+      discountsEnabled: true,
+      tipsEnabled: true
+    }
+  });
+  assert.equal(merchantResponse.statusCode, 200, merchantResponse.body);
   const productsResponse = await app.inject({ method: "GET", url: "/v1/products" });
   assert.equal(productsResponse.statusCode, 200, productsResponse.body);
   const products = productsResponse.json<{ products: Array<{ id: string }> }>().products;
@@ -42,6 +75,19 @@ try {
     payload: { productId: products[0]!.id, quantity: 1 }
   });
   assert.equal(lineResponse.statusCode, 201);
+  const lineId = lineResponse.json<{ lines: Array<{ id: string }> }>().lines[0]!.id;
+  const discountResponse = await app.inject({
+    method: "PUT",
+    url: `/v1/carts/${cartId}/lines/${encodeURIComponent(lineId)}/discount`,
+    payload: { amountMinor: "10" }
+  });
+  assert.equal(discountResponse.statusCode, 200, discountResponse.body);
+  const tipResponse = await app.inject({
+    method: "PUT",
+    url: `/v1/carts/${cartId}/tip`,
+    payload: { amountMinor: "15" }
+  });
+  assert.equal(tipResponse.statusCode, 200, tipResponse.body);
 
   const checkoutResponse = await app.inject({
     method: "POST",
@@ -77,6 +123,12 @@ try {
   });
   assert.equal(receiptResponse.statusCode, 200);
   assert.equal(receiptResponse.json<{ paymentStatus: string }>().paymentStatus, "CAPTURED");
+  assert.equal(receiptResponse.json<{ discountMinor: string }>().discountMinor, "10");
+  assert.equal(receiptResponse.json<{ tipMinor: string }>().tipMinor, "15");
+  assert.equal(
+    receiptResponse.json<{ merchant: { merchantName: string } }>().merchant.merchantName,
+    "Open POS PostgreSQL Demo"
+  );
 
   // A second cart with the same product protects against globally-colliding
   // cart/order line identifiers in the normalized PostgreSQL tables.
@@ -209,5 +261,13 @@ try {
     settlementLines: worker.settlementLines
   }));
 } finally {
+  if (originalMerchantSettings) {
+    const restored = await app.inject({
+      method: "PUT",
+      url: "/v1/merchant-settings",
+      payload: originalMerchantSettings
+    });
+    assert.equal(restored.statusCode, 200, restored.body);
+  }
   await app.close();
 }

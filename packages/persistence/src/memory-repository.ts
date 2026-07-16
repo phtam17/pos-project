@@ -9,7 +9,7 @@ import type {
   Refund,
   SettlementBatch
 } from "@pos/domain";
-import { Money } from "@pos/domain";
+import { MerchantSettings, Money } from "@pos/domain";
 
 import {
   IdempotencyConflictError,
@@ -129,6 +129,7 @@ function isInRange(value: Date | undefined, query: ReconciliationQuery): boolean
  */
 export class MemoryPosRepository implements PosRepository {
   private readonly products = new Map<string, Product>();
+  private merchantSettings = MerchantSettings.defaults();
   private readonly carts = new Map<string, Cart>();
   private readonly orders = new Map<string, Order>();
   private readonly paymentAttempts = new Map<string, PaymentAttempt>();
@@ -160,7 +161,7 @@ export class MemoryPosRepository implements PosRepository {
       .filter((product) => {
         if (!search) return true;
         const snapshot = readSnapshot(product);
-        return [snapshot.name, snapshot.sku].some(
+        return [snapshot.name, snapshot.sku, snapshot.category, snapshot.barcode].some(
           (candidate) =>
             typeof candidate === "string" && candidate.toLocaleLowerCase().includes(search)
         );
@@ -191,6 +192,40 @@ export class MemoryPosRepository implements PosRepository {
     }
     this.products.set(id, cloneAggregate(product));
     return cloneAggregate(product);
+  }
+
+  async saveProduct(product: Product): Promise<Product> {
+    const id = idOf(product);
+    if (!this.products.has(id)) throw new RepositoryNotFoundError("Product", id);
+    const sku = textField(product, "sku");
+    if (
+      sku !== undefined &&
+      [...this.products.values()].some(
+        (candidate) => idOf(candidate) !== id && textField(candidate, "sku") === sku
+      )
+    ) {
+      throw new RepositoryConflictError("Product SKU", sku);
+    }
+    const barcode = textField(product, "barcode");
+    if (
+      barcode &&
+      [...this.products.values()].some(
+        (candidate) => idOf(candidate) !== id && textField(candidate, "barcode") === barcode
+      )
+    ) {
+      throw new RepositoryConflictError("Product barcode", barcode);
+    }
+    this.products.set(id, cloneAggregate(product));
+    return cloneAggregate(product);
+  }
+
+  async getMerchantSettings(): Promise<MerchantSettings> {
+    return MerchantSettings.rehydrate(this.merchantSettings.toSnapshot());
+  }
+
+  async saveMerchantSettings(settings: MerchantSettings): Promise<MerchantSettings> {
+    this.merchantSettings = MerchantSettings.rehydrate(settings.toSnapshot());
+    return MerchantSettings.rehydrate(settings.toSnapshot());
   }
 
   async createCart(cart: Cart): Promise<Cart> {

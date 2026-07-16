@@ -83,6 +83,135 @@ describe("POS API vertical slice", () => {
     });
   });
 
+  it("manages merchant settings and products, then snapshots discounts and tips", async () => {
+    const instance = await app();
+    const settingsResponse = await instance.inject({
+      method: "PUT",
+      url: "/v1/merchant-settings",
+      payload: {
+        merchantName: "Little Saigon Market",
+        locationName: "Phoenix",
+        registerName: "Register VN-01",
+        currency: "USD",
+        receiptHeader: "Sandbox demonstration",
+        receiptFooter: "Cảm ơn quý khách!",
+        showSkuOnReceipt: true,
+        discountsEnabled: true,
+        tipsEnabled: true
+      }
+    });
+    expect(settingsResponse.statusCode).toBe(200);
+    expect(settingsResponse.json<{ version: number }>().version).toBe(2);
+
+    const createdResponse = await instance.inject({
+      method: "POST",
+      url: "/v1/products",
+      payload: {
+        sku: "BANH-MI-001",
+        name: "Bánh mì đặc biệt",
+        category: "Vietnamese food",
+        barcode: "893000000001",
+        priceMinor: "1000",
+        currency: "USD",
+        taxRateBps: 1000,
+        active: true
+      }
+    });
+    expect(createdResponse.statusCode).toBe(201);
+    const created = createdResponse.json<{ id: string }>();
+    const updatedResponse = await instance.inject({
+      method: "PUT",
+      url: `/v1/products/${created.id}`,
+      payload: {
+        sku: "BANH-MI-001",
+        name: "Bánh mì đặc biệt",
+        category: "Vietnamese food",
+        barcode: "893000000001",
+        priceMinor: "1200",
+        currency: "USD",
+        taxRateBps: 1000,
+        active: true
+      }
+    });
+    expect(updatedResponse.json<{ priceMinor: string; category: string }>()).toMatchObject({
+      priceMinor: "1200",
+      category: "Vietnamese food"
+    });
+
+    const cart = (await instance.inject({ method: "POST", url: "/v1/carts", payload: {} }))
+      .json<{ id: string; currency: string }>();
+    expect(cart.currency).toBe("USD");
+    const withLine = await instance.inject({
+      method: "POST",
+      url: `/v1/carts/${cart.id}/lines`,
+      payload: { productId: created.id, quantity: 1 }
+    });
+    const lineId = withLine.json<{ lines: Array<{ id: string }> }>().lines[0]!.id;
+    const discounted = await instance.inject({
+      method: "PUT",
+      url: `/v1/carts/${cart.id}/lines/${encodeURIComponent(lineId)}/discount`,
+      payload: { amountMinor: "200" }
+    });
+    expect(discounted.json<{ discountMinor: string; taxMinor: string }>()).toMatchObject({
+      discountMinor: "200",
+      taxMinor: "100"
+    });
+    const tipped = await instance.inject({
+      method: "PUT",
+      url: `/v1/carts/${cart.id}/tip`,
+      payload: { amountMinor: "100" }
+    });
+    expect(tipped.json<{ tipMinor: string; totalMinor: string }>()).toMatchObject({
+      tipMinor: "100",
+      totalMinor: "1200"
+    });
+    const order = (await instance.inject({
+      method: "POST",
+      url: `/v1/carts/${cart.id}/checkout`,
+      headers: { "idempotency-key": "merchant-checkout-key" }
+    })).json<{ id: string }>();
+    await instance.inject({
+      method: "POST",
+      url: `/v1/orders/${order.id}/payment-attempts`,
+      headers: { "idempotency-key": "merchant-payment-key" },
+      payload: { tender: "cash" }
+    });
+    const receipt = await instance.inject({ method: "GET", url: `/v1/orders/${order.id}/receipt` });
+    expect(receipt.json<{
+      discountMinor: string;
+      tipMinor: string;
+      totalMinor: string;
+      merchant: { merchantName: string; receiptFooter: string };
+    }>()).toMatchObject({
+      discountMinor: "200",
+      tipMinor: "100",
+      totalMinor: "1200",
+      merchant: { merchantName: "Little Saigon Market", receiptFooter: "Cảm ơn quý khách!" }
+    });
+
+    const deactivated = await instance.inject({
+      method: "PUT",
+      url: `/v1/products/${created.id}`,
+      payload: {
+        sku: "BANH-MI-001",
+        name: "Bánh mì đặc biệt",
+        category: "Vietnamese food",
+        barcode: "893000000001",
+        priceMinor: "1200",
+        currency: "USD",
+        taxRateBps: 1000,
+        active: false
+      }
+    });
+    expect(deactivated.json<{ active: boolean }>().active).toBe(false);
+    const publicProducts = (await instance.inject({ method: "GET", url: "/v1/products" }))
+      .json<{ products: Array<{ id: string }> }>().products;
+    const managedProducts = (await instance.inject({ method: "GET", url: "/v1/products?includeInactive=true" }))
+      .json<{ products: Array<{ id: string }> }>().products;
+    expect(publicProducts.some((product) => product.id === created.id)).toBe(false);
+    expect(managedProducts.some((product) => product.id === created.id)).toBe(true);
+  });
+
   it("creates a cart, checks out, captures a simulated card, and returns a receipt", async () => {
     const instance = await app();
 

@@ -5,12 +5,30 @@ export const identifierSchema = z.string().trim().min(1).max(128);
 export const createProductSchema = z.object({
   sku: z.string().trim().min(1).max(64),
   name: z.string().trim().min(1).max(160),
+  category: z.string().trim().min(1).max(80).default("Other"),
+  barcode: z.string().trim().min(1).max(80).nullable().optional(),
   priceMinor: z.string().regex(/^\d+$/).refine((value) => BigInt(value) > 0n, {
     message: "priceMinor must be greater than zero"
   }),
   currency: z.string().trim().length(3).transform((value) => value.toUpperCase()),
   taxRateBps: z.number().int().min(0).max(100_000).default(0),
   active: z.boolean().default(true)
+}).strict();
+
+export const merchantSettingsSchema = z.object({
+  merchantName: z.string().trim().min(1).max(120),
+  locationName: z.string().trim().min(1).max(120),
+  registerName: z.string().trim().min(1).max(120),
+  currency: z.string().trim().length(3).transform((value) => value.toUpperCase()),
+  receiptHeader: z.string().trim().max(240).default(""),
+  receiptFooter: z.string().trim().max(240).default("Thank you for your purchase."),
+  showSkuOnReceipt: z.boolean().default(true),
+  discountsEnabled: z.boolean().default(true),
+  tipsEnabled: z.boolean().default(true)
+}).strict();
+
+export const cartMoneyAdjustmentSchema = z.object({
+  amountMinor: z.string().regex(/^\d+$/)
 }).strict();
 
 export const addCartLineSchema = z.object({

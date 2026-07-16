@@ -1,6 +1,7 @@
 import {
   AuditEntry,
   Cart,
+  MerchantSettings,
   Money,
   Order,
   OutboxMessage,
@@ -151,7 +152,7 @@ export class PostgresPosRepository implements PosRepository {
     if (query.activeOnly) conditions.push("active = true");
     if (query.search?.trim()) {
       values.push(`%${query.search.trim()}%`);
-      conditions.push(`(name ILIKE $${values.length} OR sku ILIKE $${values.length})`);
+      conditions.push(`(name ILIKE $${values.length} OR sku ILIKE $${values.length} OR category ILIKE $${values.length} OR barcode ILIKE $${values.length})`);
     }
     values.push(Math.max(0, query.limit ?? 500));
     const limit = `$${values.length}`;
@@ -173,12 +174,14 @@ export class PostgresPosRepository implements PosRepository {
     try {
       await this.pool.query(
         `INSERT INTO products
-          (id, sku, name, unit_price_minor, currency, tax_rate_bps, active, snapshot)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          (id, sku, name, category, barcode, unit_price_minor, currency, tax_rate_bps, active, snapshot)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
         [
           product.id,
           product.sku,
           product.name,
+          product.category,
+          product.barcode,
           minor(product.unitPrice),
           product.unitPrice.currency,
           product.taxRateBps,
@@ -190,6 +193,59 @@ export class PostgresPosRepository implements PosRepository {
     } catch (error) {
       translateWriteError(error, "Product", product.id);
     }
+  }
+
+  async saveProduct(product: Product): Promise<Product> {
+    try {
+      const result = await this.pool.query(
+        `UPDATE products
+            SET sku = $2, name = $3, category = $4, barcode = $5,
+                unit_price_minor = $6, currency = $7, tax_rate_bps = $8,
+                active = $9, snapshot = $10, updated_at = now()
+          WHERE id = $1`,
+        [
+          product.id,
+          product.sku,
+          product.name,
+          product.category,
+          product.barcode,
+          minor(product.unitPrice),
+          product.unitPrice.currency,
+          product.taxRateBps,
+          product.active,
+          encodeAggregate(product)
+        ]
+      );
+      await this.assertUpdated(result.rowCount, "Product", product.id, false);
+      return Product.rehydrate(product.toSnapshot());
+    } catch (error) {
+      if (error instanceof PersistenceError) throw error;
+      translateWriteError(error, "Product", product.id);
+    }
+  }
+
+  async getMerchantSettings(): Promise<MerchantSettings> {
+    const result = await this.pool.query<SnapshotRow>(
+      "SELECT snapshot FROM merchant_settings WHERE id = 'default'"
+    );
+    const row = result.rows[0];
+    return row === undefined
+      ? MerchantSettings.defaults()
+      : decodeAggregate(row.snapshot, MerchantSettings);
+  }
+
+  async saveMerchantSettings(settings: MerchantSettings): Promise<MerchantSettings> {
+    const snapshot = settings.toSnapshot();
+    await this.pool.query(
+      `INSERT INTO merchant_settings (id, version, snapshot, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (id) DO UPDATE SET
+         version = EXCLUDED.version,
+         snapshot = EXCLUDED.snapshot,
+         updated_at = EXCLUDED.updated_at`,
+      [settings.id, settings.version, encodeAggregate(settings), snapshot.createdAt, snapshot.updatedAt]
+    );
+    return MerchantSettings.rehydrate(snapshot);
   }
 
   async createCart(cart: Cart): Promise<Cart> {
@@ -268,9 +324,9 @@ export class PostgresPosRepository implements PosRepository {
         await client.query(
           `INSERT INTO orders
             (id, order_number, cart_id, status, currency, subtotal_minor,
-             discount_minor, tax_minor, total_minor, version, snapshot,
+             discount_minor, tax_minor, tip_minor, total_minor, version, snapshot,
              created_at, updated_at, completed_at)
-           VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+           VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
           [
             order.id,
             snapshot.cartId,
@@ -279,6 +335,7 @@ export class PostgresPosRepository implements PosRepository {
             minor(snapshot.subtotal),
             minor(snapshot.discountTotal),
             minor(snapshot.taxTotal),
+            minor(snapshot.tipTotal ?? Money.zero(snapshot.currency)),
             minor(snapshot.total),
             snapshot.version,
             encodeAggregate(order),
@@ -1117,6 +1174,7 @@ export class PostgresPosRepository implements PosRepository {
   ): Promise<T | undefined> {
     const allowedTables = new Set([
       "products",
+      "merchant_settings",
       "carts",
       "orders",
       "payment_attempts",
@@ -1142,7 +1200,8 @@ export class PostgresPosRepository implements PosRepository {
     const tables: Record<string, string> = {
       Order: "orders",
       PaymentAttempt: "payment_attempts",
-      Refund: "refunds"
+      Refund: "refunds",
+      Product: "products"
     };
     const table = tables[entity];
     if (!table) throw new PersistenceError(`Unknown aggregate ${entity}`, "INTERNAL_ERROR");

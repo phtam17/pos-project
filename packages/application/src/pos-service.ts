@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   AuditEntry,
   Cart,
+  MerchantSettings,
   Money,
   Order,
   OutboxMessage,
@@ -36,10 +37,30 @@ import { ApplicationError, notFound } from "./errors.js";
 export interface CreateProductCommand {
   readonly sku: string;
   readonly name: string;
+  readonly category?: string;
+  readonly barcode?: string | null | undefined;
   readonly priceMinor: string;
   readonly currency: string;
   readonly taxRateBps?: number;
   readonly active?: boolean;
+  readonly actorId?: string;
+}
+
+export interface UpdateProductCommand extends CreateProductCommand {
+  readonly productId: string;
+}
+
+export interface UpdateMerchantSettingsCommand {
+  readonly merchantName: string;
+  readonly locationName: string;
+  readonly registerName: string;
+  readonly currency: string;
+  readonly receiptHeader?: string;
+  readonly receiptFooter?: string;
+  readonly showSkuOnReceipt?: boolean;
+  readonly discountsEnabled?: boolean;
+  readonly tipsEnabled?: boolean;
+  readonly actorId?: string;
 }
 
 export interface StartPaymentCommand {
@@ -128,9 +149,14 @@ export class PosService {
     return provider;
   }
 
-  listProducts(search?: string, limit = 500, offset = 0): Promise<readonly Product[]> {
+  listProducts(
+    search?: string,
+    limit = 500,
+    offset = 0,
+    activeOnly = true
+  ): Promise<readonly Product[]> {
     return this.repository.listProducts({
-      activeOnly: true,
+      activeOnly,
       limit,
       offset,
       ...(search ? { search } : {})
@@ -142,6 +168,8 @@ export class PosService {
       id: randomUUID(),
       sku: command.sku,
       name: command.name,
+      category: command.category ?? "Other",
+      barcode: command.barcode ?? null,
       unitPrice: Money.fromMinor(parseMinor(command.priceMinor), command.currency),
       taxRateBps: command.taxRateBps ?? 0,
       active: command.active ?? true
@@ -149,13 +177,70 @@ export class PosService {
     await this.repository.createProduct(product);
     await this.record("Product", product.id, "PRODUCT_CREATED", {
       sku: product.sku,
+      category: product.category,
       priceMinor: product.unitPrice.minorUnits.toString()
-    });
+    }, command.actorId ?? null);
     return product;
   }
 
-  async createCart(currency = "USD"): Promise<Cart> {
-    const cart = new Cart({ id: randomUUID(), currency });
+  async getProduct(id: string): Promise<Product> {
+    return (await this.repository.getProduct(id)) ?? Promise.reject(notFound("Product", id));
+  }
+
+  async updateProduct(command: UpdateProductCommand): Promise<Product> {
+    const existing = await this.getProduct(command.productId);
+    const product = existing.withChanges({
+      sku: command.sku,
+      name: command.name,
+      category: command.category ?? "Other",
+      barcode: command.barcode ?? null,
+      unitPrice: Money.fromMinor(parseMinor(command.priceMinor), command.currency),
+      taxRateBps: command.taxRateBps ?? 0,
+      active: command.active ?? true
+    });
+    await this.repository.saveProduct(product);
+    await this.record("Product", product.id, "PRODUCT_UPDATED", {
+      sku: product.sku,
+      category: product.category,
+      active: product.active,
+      priceMinor: product.unitPrice.minorUnits.toString(),
+      taxRateBps: product.taxRateBps
+    }, command.actorId ?? null);
+    return product;
+  }
+
+  getMerchantSettings(): Promise<MerchantSettings> {
+    return this.repository.getMerchantSettings();
+  }
+
+  async updateMerchantSettings(command: UpdateMerchantSettingsCommand): Promise<MerchantSettings> {
+    const current = await this.repository.getMerchantSettings();
+    const settings = current.withChanges({
+      merchantName: command.merchantName,
+      locationName: command.locationName,
+      registerName: command.registerName,
+      currency: command.currency,
+      receiptHeader: command.receiptHeader ?? "",
+      receiptFooter: command.receiptFooter ?? "Thank you for your purchase.",
+      showSkuOnReceipt: command.showSkuOnReceipt ?? true,
+      discountsEnabled: command.discountsEnabled ?? true,
+      tipsEnabled: command.tipsEnabled ?? true
+    }, this.now());
+    await this.repository.saveMerchantSettings(settings);
+    await this.record("MerchantSettings", settings.id, "MERCHANT_SETTINGS_UPDATED", {
+      merchantName: settings.merchantName,
+      locationName: settings.locationName,
+      registerName: settings.registerName,
+      currency: settings.currency,
+      discountsEnabled: settings.discountsEnabled,
+      tipsEnabled: settings.tipsEnabled
+    }, command.actorId ?? null);
+    return settings;
+  }
+
+  async createCart(currency?: string): Promise<Cart> {
+    const selectedCurrency = currency ?? (await this.repository.getMerchantSettings()).currency;
+    const cart = new Cart({ id: randomUUID(), currency: selectedCurrency });
     await this.repository.createCart(cart);
     await this.record("Cart", cart.id, "CART_CREATED", { currency: cart.currency });
     return cart;
@@ -186,6 +271,52 @@ export class PosService {
     cart.removeLine(lineId, this.now());
     await this.repository.saveCart(cart, expectedVersion);
     await this.record("Cart", cart.id, "CART_LINE_REMOVED", { lineId });
+    return cart;
+  }
+
+  async applyCartLineDiscount(
+    cartId: string,
+    lineId: string,
+    amountMinor: string,
+    actorId?: string
+  ): Promise<Cart> {
+    const [cart, settings] = await Promise.all([
+      this.getCart(cartId),
+      this.repository.getMerchantSettings()
+    ]);
+    if (!settings.discountsEnabled) {
+      throw new ApplicationError(
+        "Discounts are disabled in merchant settings",
+        "DISCOUNTS_DISABLED",
+        409
+      );
+    }
+    const expectedVersion = cart.version;
+    cart.applyLineDiscount(
+      lineId,
+      Money.fromMinor(parseMinor(amountMinor), cart.currency),
+      this.now()
+    );
+    await this.repository.saveCart(cart, expectedVersion);
+    await this.record("Cart", cart.id, "CART_DISCOUNT_UPDATED", {
+      lineId,
+      amountMinor
+    }, actorId ?? null);
+    return cart;
+  }
+
+  async setCartTip(cartId: string, amountMinor: string, actorId?: string): Promise<Cart> {
+    const [cart, settings] = await Promise.all([
+      this.getCart(cartId),
+      this.repository.getMerchantSettings()
+    ]);
+    if (!settings.tipsEnabled) {
+      throw new ApplicationError("Tips are disabled in merchant settings", "TIPS_DISABLED", 409);
+    }
+    const expectedVersion = cart.version;
+    cart.setTip(Money.fromMinor(parseMinor(amountMinor), cart.currency), this.now());
+    await this.repository.saveCart(cart, expectedVersion);
+    await this.record("Cart", cart.id, "CART_TIP_UPDATED", { amountMinor }, actorId ?? null);
     return cart;
   }
 
