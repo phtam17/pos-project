@@ -67,6 +67,20 @@ describe("POS API vertical slice", () => {
     const ready = await instance.inject({ method: "GET", url: "/ready" });
     expect(ready.statusCode).toBe(503);
     expect(ready.json<{ error: { code: string } }>().error.code).toBe("NOT_READY");
+
+    const runtime = await instance.inject({ method: "GET", url: "/v1/runtime-status" });
+    expect(runtime.statusCode).toBe(200);
+    expect(runtime.json<{
+      mode: string;
+      api: { connected: boolean };
+      persistence: { mode: string; ready: boolean; ephemeral: boolean };
+      simulators: { card: { ready: boolean }; vietnamQr: { ready: boolean } };
+    }>()).toMatchObject({
+      mode: "sandbox",
+      api: { connected: true },
+      persistence: { mode: "memory", ready: false, ephemeral: true },
+      simulators: { card: { ready: true }, vietnamQr: { ready: true } }
+    });
   });
 
   it("creates a cart, checks out, captures a simulated card, and returns a receipt", async () => {

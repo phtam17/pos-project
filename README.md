@@ -31,6 +31,11 @@ npm run dev
 
 Open `http://127.0.0.1:5173`. With no `DATABASE_URL`, the API uses an in-memory repository populated with sample products.
 
+The top-right environment control reports `Sandbox · Memory` or
+`Sandbox · PostgreSQL` and shows live readiness for the API, persistence layer,
+card simulator, and Vietnam QR simulator. In memory mode, the register displays a
+warning that restarting the API erases demo transactions.
+
 If an existing `.env` contains a PostgreSQL URL but Docker is not running, set
 `PERSISTENCE_MODE=memory`. This explicitly selects the zero-setup sandbox and
 prevents the API from trying the inactive database.

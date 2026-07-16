@@ -19,6 +19,7 @@ import {
   type PaymentAttemptDto,
   type ProductDto,
   type ReceiptDto,
+  type RuntimeStatusDto,
   type SaleDetailDto,
   type Tender,
   type VietnamQrDetailsDto,
@@ -119,6 +120,56 @@ function formatDate(value?: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "Just now";
   return new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(date);
+}
+
+function EnvironmentStatus({
+  status,
+  open,
+  onToggle
+}: {
+  status: RuntimeStatusDto | null;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  const ready = status?.api.connected === true && status.persistence.ready;
+  const persistenceLabel = status?.persistence.mode === "postgres" ? "PostgreSQL" : "Memory";
+  const rows = [
+    ["API connected", status?.api.connected === true],
+    ["Persistence ready", status?.persistence.ready === true],
+    ["Card simulator ready", status?.simulators.card.ready === true],
+    ["Vietnam QR simulator ready", status?.simulators.vietnamQr.ready === true]
+  ] as const;
+
+  return (
+    <div className="environment-status">
+      <button
+        className={`environment-pill ${ready ? "ready" : "attention"}`}
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        aria-controls="environment-status-panel"
+      >
+        <i /> Sandbox · {status ? persistenceLabel : "Checking"}
+      </button>
+      {open && (
+        <section id="environment-status-panel" className="environment-popover" aria-label="Sandbox environment status">
+          <div className="environment-heading">
+            <div><p className="eyebrow">Runtime environment</p><strong>Sandbox · {persistenceLabel}</strong></div>
+            <span className={ready ? "ready" : "attention"}>{ready ? "Ready" : "Attention"}</span>
+          </div>
+          <ul>
+            {rows.map(([label, itemReady]) => (
+              <li key={label}><i className={itemReady ? "ready" : "attention"} /><span>{label}</span><b>{itemReady ? "Ready" : "Unavailable"}</b></li>
+            ))}
+          </ul>
+          {status?.persistence.ephemeral && (
+            <p className="environment-caution"><Icon name="alert" /> Restarting the API erases memory-mode carts, orders, and payments.</p>
+          )}
+          <small>Last checked {status ? formatDate(status.checkedAt) : "now"}</small>
+        </section>
+      )}
+    </div>
+  );
 }
 
 function formatReceiptDate(value: string): string {
@@ -733,6 +784,8 @@ export function App() {
   const [pendingCheckout, setPendingCheckout] = useState<PendingCheckout | null>(null);
   const [receipt, setReceipt] = useState<ReceiptDto | null>(null);
   const [recentSales, setRecentSales] = useState<RecentSale[]>([]);
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatusDto | null>(null);
+  const [environmentOpen, setEnvironmentOpen] = useState(false);
   const [now, setNow] = useState(() => new Date());
   const initialized = useRef(false);
   const searchInput = useRef<HTMLInputElement>(null);
@@ -772,6 +825,40 @@ export function App() {
     const timer = window.setInterval(() => setNow(new Date()), 30_000);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    const refreshRuntimeStatus = async () => {
+      try {
+        const status = await api.getRuntimeStatus();
+        if (active) setRuntimeStatus(status);
+      } catch {
+        if (active) {
+          setRuntimeStatus((current) => current ? {
+            ...current,
+            api: { connected: false, ready: false },
+            persistence: { ...current.persistence, ready: false },
+            checkedAt: new Date().toISOString()
+          } : null);
+        }
+      }
+    };
+    void refreshRuntimeStatus();
+    const timer = window.setInterval(() => void refreshRuntimeStatus(), 15_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!environmentOpen) return;
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setEnvironmentOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [environmentOpen]);
 
   useEffect(() => {
     if (!notice) return;
@@ -1109,10 +1196,14 @@ export function App() {
 
         <div className="register-health">
           <span className="header-time">{new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(now)}</span>
-          <span className="health-pill"><i /> Register open</span>
-          <span className="reader-pill"><Icon name="signal" /> Reader ready</span>
+          <EnvironmentStatus status={runtimeStatus} open={environmentOpen} onToggle={() => setEnvironmentOpen((current) => !current)} />
+          <span className="reader-pill"><Icon name="signal" /> {runtimeStatus?.simulators.card.ready === false ? "Reader unavailable" : "Reader ready"}</span>
         </div>
       </header>
+
+      {runtimeStatus?.persistence.ephemeral && (
+        <div className="memory-mode-banner" role="status"><Icon name="alert" /><strong>Sandbox memory mode:</strong> restarting the API erases demo transactions. Use PostgreSQL to keep them.</div>
+      )}
 
       {activeView === "checkout" ? <main className="register-layout">
         <section className="catalog-panel" aria-labelledby="catalog-title">

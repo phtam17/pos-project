@@ -96,7 +96,8 @@ button:disabled {
 .main-nav,
 .nav-item,
 .health-pill,
-.reader-pill {
+.reader-pill,
+.environment-pill {
   display: flex;
   align-items: center;
 }
@@ -187,6 +188,7 @@ button:disabled {
 }
 
 .register-health {
+  position: relative;
   justify-content: flex-end;
   gap: 9px;
 }
@@ -199,7 +201,8 @@ button:disabled {
 }
 
 .health-pill,
-.reader-pill {
+.reader-pill,
+.environment-pill {
   gap: 7px;
   padding: 8px 10px;
   color: #385148;
@@ -210,6 +213,59 @@ button:disabled {
   font-weight: 650;
   white-space: nowrap;
 }
+
+.environment-status { position: relative; }
+
+.environment-pill { border: 1px solid #dfe9e3; }
+.environment-pill i { width: 7px; height: 7px; border: 2px solid #cfeadb; border-radius: 50%; }
+.environment-pill.ready i { background: #2d9b6c; box-shadow: 0 0 0 2px #e4f5ec; }
+.environment-pill.attention { color: #78521d; background: #fff8eb; border-color: #ead9b8; }
+.environment-pill.attention i { background: #c5842d; border-color: #f4dfb9; }
+
+.environment-popover {
+  position: absolute;
+  z-index: 45;
+  top: calc(100% + 12px);
+  right: 0;
+  width: min(340px, calc(100vw - 28px));
+  padding: 16px;
+  color: var(--ink);
+  background: #fff;
+  border: 1px solid #dce3df;
+  border-radius: 13px;
+  box-shadow: 0 20px 55px rgb(19 36 28 / 18%);
+}
+
+.environment-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.environment-heading .eyebrow { margin-bottom: 3px; }
+.environment-heading strong { font-size: 13px; }
+.environment-heading > span { padding: 4px 7px; border-radius: 999px; font-size: 8px; font-weight: 800; text-transform: uppercase; }
+.environment-heading > span.ready { color: #28634b; background: #e8f4ee; }
+.environment-heading > span.attention { color: #80571f; background: #fff0d3; }
+.environment-popover ul { display: grid; gap: 8px; margin: 14px 0; padding: 12px 0; border-block: 1px solid #e7ebe9; list-style: none; }
+.environment-popover li { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; font-size: 9px; }
+.environment-popover li i { width: 7px; height: 7px; border-radius: 50%; }
+.environment-popover li i.ready { background: #2d9b6c; }
+.environment-popover li i.attention { background: #c5842d; }
+.environment-popover li b { color: var(--muted); font-size: 8px; }
+.environment-caution { display: flex; align-items: flex-start; gap: 7px; margin: 0 0 10px; padding: 9px; color: #77521e; background: #fff8eb; border-radius: 8px; font-size: 8px; line-height: 1.45; }
+.environment-caution svg { flex: 0 0 auto; width: 12px; height: 12px; }
+.environment-popover > small { color: var(--muted); font-size: 7px; }
+
+.memory-mode-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 6px 16px;
+  color: #704d1b;
+  background: #fff6e5;
+  border-bottom: 1px solid #eadabb;
+  font-size: 9px;
+}
+
+.memory-mode-banner svg { width: 13px; height: 13px; }
 
 .health-pill i {
   width: 7px;

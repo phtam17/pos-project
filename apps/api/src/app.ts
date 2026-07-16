@@ -126,6 +126,45 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     }))
   }));
 
+  app.get("/v1/runtime-status", async () => {
+    let persistenceReady = true;
+    try {
+      await repository.healthCheck();
+    } catch {
+      persistenceReady = false;
+    }
+    const cardProviderStatus = providers.find((provider) =>
+      provider.capabilities.paymentMethods?.includes("CARD")
+    );
+    const vietnamQrProviderStatus = providers.find((provider) =>
+      provider.capabilities.paymentMethods?.includes("VIETNAM_QR")
+    );
+
+    return {
+      mode: "sandbox",
+      api: { connected: true, ready: true },
+      persistence: {
+        mode: persistenceMode,
+        ready: persistenceReady,
+        ephemeral: persistenceMode === "memory"
+      },
+      simulators: {
+        card: {
+          ready: cardProviderStatus !== undefined,
+          provider: cardProviderStatus?.name ?? null
+        },
+        vietnamQr: {
+          ready: vietnamQrProviderStatus !== undefined,
+          provider: vietnamQrProviderStatus?.name ?? null
+        }
+      },
+      warnings: persistenceMode === "memory"
+        ? ["Memory mode erases carts, orders, payments, and settings when the API restarts."]
+        : [],
+      checkedAt: new Date().toISOString()
+    };
+  });
+
   app.get("/v1/products", async (request) => {
     const query = z.object({
       search: z.string().trim().max(160).optional(),

@@ -58,6 +58,22 @@ export interface ProductDto {
   available: boolean;
 }
 
+export interface RuntimeStatusDto {
+  mode: "sandbox";
+  api: { connected: boolean; ready: boolean };
+  persistence: {
+    mode: "memory" | "postgres";
+    ready: boolean;
+    ephemeral: boolean;
+  };
+  simulators: {
+    card: { ready: boolean; provider?: string };
+    vietnamQr: { ready: boolean; provider?: string };
+  };
+  warnings: string[];
+  checkedAt: string;
+}
+
 export interface CartLineDto {
   id: string;
   productId: string;
@@ -226,6 +242,47 @@ function normalizeProduct(value: unknown): ProductDto {
     priceMinor: amount(source.priceMinor ?? source.unitPriceMinor),
     currency: text(source.currency, "USD").toUpperCase(),
     available: source.available !== false && source.active !== false
+  };
+}
+
+function normalizeRuntimeStatus(value: unknown): RuntimeStatusDto {
+  const source = record(value);
+  const apiStatus = record(source.api);
+  const persistence = record(source.persistence);
+  const simulators = record(source.simulators);
+  const card = record(simulators.card);
+  const vietnamQr = record(simulators.vietnamQr);
+  const persistenceMode = text(persistence.mode).toLowerCase() === "postgres"
+    ? "postgres"
+    : "memory";
+  const cardProvider = optionalText(card.provider);
+  const vietnamQrProvider = optionalText(vietnamQr.provider);
+
+  return {
+    mode: "sandbox",
+    api: {
+      connected: apiStatus.connected === true,
+      ready: apiStatus.ready === true
+    },
+    persistence: {
+      mode: persistenceMode,
+      ready: persistence.ready === true,
+      ephemeral: persistence.ephemeral === true || persistenceMode === "memory"
+    },
+    simulators: {
+      card: {
+        ready: card.ready === true,
+        ...(cardProvider ? { provider: cardProvider } : {})
+      },
+      vietnamQr: {
+        ready: vietnamQr.ready === true,
+        ...(vietnamQrProvider ? { provider: vietnamQrProvider } : {})
+      }
+    },
+    warnings: Array.isArray(source.warnings)
+      ? source.warnings.map((warning) => text(warning)).filter(Boolean)
+      : [],
+    checkedAt: text(source.checkedAt, new Date().toISOString())
   };
 }
 
@@ -506,6 +563,10 @@ async function request(path: string, init: RequestInit = {}): Promise<unknown> {
 }
 
 export const api = {
+  async getRuntimeStatus(): Promise<RuntimeStatusDto> {
+    return normalizeRuntimeStatus(await request("/v1/runtime-status"));
+  },
+
   async listProducts(): Promise<ProductDto[]> {
     const body = await request("/v1/products");
     const products = envelope(body, ["products"]);
