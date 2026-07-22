@@ -42,4 +42,36 @@ describe("sandbox configuration", () => {
       demoResetIntervalMinutes: 60
     });
   });
+
+  it("rejects the known .env.example placeholder secrets in public mode", () => {
+    expect(() => loadConfig({
+      PUBLIC_SANDBOX: "true",
+      AUTH_SECRET: "local-sandbox-auth-secret-change-before-sharing",
+      SIMULATED_WEBHOOK_SECRET: "local-sandbox-webhook-secret-change-before-sharing",
+      DEMO_CASHIER_PIN: "135790",
+      DEMO_MANAGER_PIN: "246801",
+      CORS_ORIGINS: "https://sandbox.example.test",
+      DEMO_RESET_INTERVAL_MINUTES: "60"
+    })).toThrow(/AUTH_SECRET/);
+  });
+
+  it("requires HTTPS origins and rate limiting in public mode", () => {
+    const hardened = {
+      PUBLIC_SANDBOX: "true",
+      AUTH_SECRET: "auth-secret-at-least-thirty-two-characters-long",
+      SIMULATED_WEBHOOK_SECRET: "webhook-secret-at-least-thirty-two-characters",
+      DEMO_CASHIER_PIN: "135790",
+      DEMO_MANAGER_PIN: "246801",
+      DEMO_RESET_INTERVAL_MINUTES: "60"
+    };
+    expect(() => loadConfig({
+      ...hardened,
+      CORS_ORIGINS: "http://sandbox.example.test"
+    })).toThrow(/HTTPS CORS_ORIGINS/);
+    expect(() => loadConfig({
+      ...hardened,
+      CORS_ORIGINS: "https://sandbox.example.test",
+      RATE_LIMIT_ENABLED: "false"
+    })).toThrow(/RATE_LIMIT_ENABLED/);
+  });
 });

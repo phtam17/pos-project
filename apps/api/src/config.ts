@@ -35,6 +35,12 @@ const DEVELOPMENT_AUTH_SECRET = "development-auth-secret-change-me";
 const DEVELOPMENT_WEBHOOK_SECRET = "development-only-secret";
 const DEVELOPMENT_CASHIER_PIN = "1234";
 const DEVELOPMENT_MANAGER_PIN = "2468";
+const PUBLIC_SECRET_PLACEHOLDERS = new Set([
+  DEVELOPMENT_AUTH_SECRET,
+  DEVELOPMENT_WEBHOOK_SECRET,
+  "local-sandbox-auth-secret-change-before-sharing",
+  "local-sandbox-webhook-secret-change-before-sharing"
+]);
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
   const port = Number.parseInt(env.PORT ?? "3000", 10);
@@ -136,13 +142,10 @@ function integerValue(
 
 function validatePublicSandbox(config: ApiConfig): void {
   if (!config.authEnabled) throw new Error("PUBLIC_SANDBOX requires SANDBOX_AUTH_ENABLED=true");
-  if (!config.authSecret || config.authSecret === DEVELOPMENT_AUTH_SECRET || config.authSecret.length < 32) {
+  if (!config.authSecret || unsafePublicSecret(config.authSecret)) {
     throw new Error("PUBLIC_SANDBOX requires a unique AUTH_SECRET of at least 32 characters");
   }
-  if (
-    config.simulatedWebhookSecret === DEVELOPMENT_WEBHOOK_SECRET ||
-    config.simulatedWebhookSecret.length < 32
-  ) {
+  if (unsafePublicSecret(config.simulatedWebhookSecret)) {
     throw new Error("PUBLIC_SANDBOX requires a unique SIMULATED_WEBHOOK_SECRET of at least 32 characters");
   }
   if (config.authSecret === config.simulatedWebhookSecret) {
@@ -159,10 +162,28 @@ function validatePublicSandbox(config: ApiConfig): void {
   ) {
     throw new Error("PUBLIC_SANDBOX requires distinct, non-default staff PINs of at least 6 digits");
   }
-  if (config.corsOrigins.length === 0 || config.corsOrigins.includes("*")) {
-    throw new Error("PUBLIC_SANDBOX requires explicit CORS_ORIGINS");
+  if (
+    config.corsOrigins.length === 0 ||
+    config.corsOrigins.includes("*") ||
+    config.corsOrigins.some((origin) => {
+      try {
+        return new URL(origin).protocol !== "https:";
+      } catch {
+        return true;
+      }
+    })
+  ) {
+    throw new Error("PUBLIC_SANDBOX requires explicit HTTPS CORS_ORIGINS");
   }
   if (!config.demoResetEnabled || (config.demoResetIntervalMinutes ?? 0) <= 0) {
     throw new Error("PUBLIC_SANDBOX requires an automatic DEMO_RESET_INTERVAL_MINUTES");
   }
+  if (!config.rateLimitEnabled) {
+    throw new Error("PUBLIC_SANDBOX requires RATE_LIMIT_ENABLED=true");
+  }
+}
+
+function unsafePublicSecret(value: string): boolean {
+  return value.length < 32 || PUBLIC_SECRET_PLACEHOLDERS.has(value)
+    || /change[-_ ]?(?:me|before[-_ ]?sharing)|development[-_ ]?(?:only|secret)/i.test(value);
 }

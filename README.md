@@ -134,12 +134,19 @@ The API refuses any `APP_MODE` except `sandbox`; this codebase cannot be switche
 into a live-looking payment mode. For a demo exposed beyond your own computer, set
 `PUBLIC_SANDBOX=true`. Startup then requires all of the following:
 
-- unique `AUTH_SECRET` and `SIMULATED_WEBHOOK_SECRET` values of at least 32
-  characters;
+- newly generated `AUTH_SECRET` and `SIMULATED_WEBHOOK_SECRET` values of at least
+  32 characters (the example and development placeholders are rejected);
 - non-default cashier and manager PINs of at least six digits;
-- explicit `CORS_ORIGINS` rather than a wildcard;
+- explicit HTTPS `CORS_ORIGINS` rather than a wildcard;
+- `RATE_LIMIT_ENABLED=true`;
 - authentication and automatic demo reset enabled, with a positive
   `DEMO_RESET_INTERVAL_MINUTES`.
+
+Public mode adds a one-click **Enter sandbox demo** option. Each visitor receives a
+signed guest session whose carts, orders, payment attempts, payments, and receipts
+are isolated from every other visitor. Guest access is cashier-only: it cannot open
+merchant management, reconciliation, audit history, or manager-authorized refunds.
+The regular staff sign-in remains available for the site owner.
 
 The built-in limiter is process-local and suitable only for this single-process
 sandbox. Use a shared store, trusted identity provider, TLS, and a real secret
@@ -155,6 +162,9 @@ npm run db:migrate
 npm run db:seed
 npm run dev
 ```
+
+The Compose database port is bound to `127.0.0.1` so PostgreSQL is reachable from
+the host development tools without being exposed on every network interface.
 
 Root scripts load `.env` when it exists. The register build also reads its `VITE_` variables from that root file.
 
