@@ -547,11 +547,13 @@ describe("POS API vertical slice", () => {
   it("recovers a capture when the provider accepted it but the first response was lost", async () => {
     class LostResponseProvider extends SimulatedPaymentProvider {
       private loseNextResponse = true;
+      private acceptedAt: Date | undefined;
 
       override async startSale(input: StartSaleRequest) {
         const result = await super.startSale(input);
         if (this.loseNextResponse) {
           this.loseNextResponse = false;
+          this.acceptedAt = result.processedAt;
           throw new PaymentProviderError(
             "PROVIDER_UNAVAILABLE",
             "Simulated response was lost after provider acceptance",
@@ -559,6 +561,16 @@ describe("POS API vertical slice", () => {
           );
         }
         return result;
+      }
+
+      override async getStatus(attemptId: string): Promise<PaymentResult> {
+        const result = await super.getStatus(attemptId);
+        return {
+          ...result,
+          // Make the provider's capture timestamp deterministically older
+          // than the API's local UNKNOWN recovery write.
+          processedAt: new Date((this.acceptedAt ?? result.processedAt).getTime() - 1_000)
+        };
       }
     }
 

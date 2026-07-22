@@ -1164,20 +1164,36 @@ export class PosService {
   ): Promise<PaymentAttempt> {
     let current = initial;
     for (let retry = 0; retry < 4; retry += 1) {
-      if (result.processedAt.getTime() < current.updatedAt.getTime()) return current;
+      // A provider capture is a financial fact and must dominate a locally
+      // recorded UNKNOWN state even when the provider's event timestamp
+      // predates the local recovery write. This occurs when the provider
+      // accepted a payment but its first response was lost: the API records
+      // UNKNOWN after the provider has already timestamped CAPTURED.
+      const captureOverridesStaleState =
+        result.status === "CAPTURED" && current.status !== "CAPTURED";
+      if (
+        result.processedAt.getTime() < current.updatedAt.getTime() &&
+        !captureOverridesStaleState
+      ) {
+        return current;
+      }
       if (TERMINAL_STATUSES.has(current.status) && result.status !== "CAPTURED") {
         return current;
       }
 
+      const transitionAt = captureOverridesStaleState &&
+        result.processedAt.getTime() < current.updatedAt.getTime()
+        ? current.updatedAt
+        : result.processedAt;
       const expectedVersion = current.version;
       const qrChanged = result.vietnamQr
-        ? current.updateVietnamQr(result.vietnamQr, result.processedAt)
+        ? current.updateVietnamQr(result.vietnamQr, transitionAt)
         : false;
       if (current.status !== result.status) {
         current.transitionTo(result.status, {
           ...(result.providerReference ? { providerReference: result.providerReference } : {}),
           failureCode: result.failureCode,
-          at: result.processedAt
+          at: transitionAt
         });
       } else if (!qrChanged) {
         return current;
