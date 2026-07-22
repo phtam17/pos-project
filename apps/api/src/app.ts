@@ -212,6 +212,28 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     }
     return staff;
   };
+  const requireCartAccess = async (id: string, staff?: StaffSession): Promise<void> => {
+    if (!(await repository.getCart(id, staff?.scopeId))) {
+      throw new ApplicationError(`Cart not found: ${id}`, "NOT_FOUND", 404);
+    }
+  };
+  const requireOrderAccess = async (id: string, staff?: StaffSession): Promise<void> => {
+    if (!(await repository.getOrder(id, staff?.scopeId))) {
+      throw new ApplicationError(`Order not found: ${id}`, "NOT_FOUND", 404);
+    }
+  };
+  const requireAttemptAccess = async (id: string, staff?: StaffSession): Promise<void> => {
+    const attempt = await repository.getPaymentAttempt(id);
+    if (!attempt || !(await repository.getOrder(attempt.orderId, staff?.scopeId))) {
+      throw new ApplicationError(`Payment attempt not found: ${id}`, "NOT_FOUND", 404);
+    }
+  };
+  const requirePaymentAccess = async (id: string, staff?: StaffSession): Promise<void> => {
+    const payment = await repository.getPayment(id);
+    if (!payment || !(await repository.getOrder(payment.orderId, staff?.scopeId))) {
+      throw new ApplicationError(`Payment not found: ${id}`, "NOT_FOUND", 404);
+    }
+  };
 
   app.get("/health", async () => ({
     status: "live",
@@ -272,7 +294,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       },
       auth: {
         enabled: authEnabled,
-        publicSandbox: config.publicSandbox ?? false
+        publicSandbox: config.publicSandbox ?? false,
+        guestAccess: authEnabled && (config.publicSandbox ?? false)
       },
       demoReset: {
         enabled: resetEnabled,
@@ -301,7 +324,28 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       staff: {
         id: result.session.id,
         name: result.session.name,
-        role: result.session.role
+        role: result.session.role,
+        guest: false
+      },
+      expiresAt: result.session.expiresAt.toISOString()
+    };
+  });
+
+  app.post("/v1/auth/guest", async () => {
+    if (!authEnabled || !(config.publicSandbox ?? false)) {
+      throw new ApplicationError("Public guest access is disabled", "GUEST_ACCESS_DISABLED", 404);
+    }
+    const result = auth.createGuestSession();
+    await service.recordAudit("StaffSession", result.session.id, "GUEST_SESSION_STARTED", {
+      scopeId: result.session.scopeId
+    }, result.session.id);
+    return {
+      token: result.token,
+      staff: {
+        id: result.session.id,
+        name: result.session.name,
+        role: result.session.role,
+        guest: true
       },
       expiresAt: result.session.expiresAt.toISOString()
     };
@@ -310,7 +354,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   app.get("/v1/auth/me", async (request) => {
     const staff = requireStaff(request);
     return staff ? {
-      staff: { id: staff.id, name: staff.name, role: staff.role },
+      staff: { id: staff.id, name: staff.name, role: staff.role, guest: staff.guest },
       expiresAt: staff.expiresAt.toISOString()
     } : { authDisabled: true };
   });
@@ -319,6 +363,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     const staff = requireStaff(request);
     if (!staff) throw new ApplicationError("Authentication is required", "UNAUTHORIZED", 401);
     const body = managerApprovalSchema.parse(request.body);
+    await requirePaymentAccess(body.paymentId, staff);
     let approval: ReturnType<SandboxAuth["createManagerApproval"]>;
     try {
       approval = auth.createManagerApproval({
@@ -405,18 +450,25 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     const body = z.object({ currency: z.string().trim().length(3).optional() })
       .strict()
       .parse(request.body ?? {});
-    const cart = await service.createCart(body.currency?.toUpperCase(), staff?.id);
+    const cart = await service.createCart(
+      body.currency?.toUpperCase(),
+      staff?.id,
+      staff?.scopeId
+    );
     return reply.code(201).send(cartDto(cart));
   });
 
   app.get("/v1/carts/:id", async (request) => {
+    const staff = requireStaff(request);
     const { id } = cartIdParams.parse(request.params);
+    await requireCartAccess(id, staff);
     return cartDto(await service.getCart(id));
   });
 
   app.post("/v1/carts/:id/lines", async (request, reply) => {
     const staff = requireStaff(request);
     const { id } = cartIdParams.parse(request.params);
+    await requireCartAccess(id, staff);
     const body = addCartLineSchema.parse(request.body);
     const cart = await service.addCartLine(id, body.productId, body.quantity, staff?.id);
     return reply.code(201).send(cartDto(cart));
@@ -425,12 +477,14 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   app.delete("/v1/carts/:id/lines/:lineId", async (request) => {
     const staff = requireStaff(request);
     const { id, lineId } = cartLineParams.parse(request.params);
+    await requireCartAccess(id, staff);
     return cartDto(await service.removeCartLine(id, lineId, staff?.id));
   });
 
   app.put("/v1/carts/:id/lines/:lineId/discount", async (request) => {
     const staff = requireStaff(request);
     const { id, lineId } = cartLineParams.parse(request.params);
+    await requireCartAccess(id, staff);
     const body = cartMoneyAdjustmentSchema.parse(request.body);
     return cartDto(await service.applyCartLineDiscount(id, lineId, body.amountMinor, staff?.id));
   });
@@ -438,6 +492,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   app.put("/v1/carts/:id/tip", async (request) => {
     const staff = requireStaff(request);
     const { id } = cartIdParams.parse(request.params);
+    await requireCartAccess(id, staff);
     const body = cartMoneyAdjustmentSchema.parse(request.body);
     return cartDto(await service.setCartTip(id, body.amountMinor, staff?.id));
   });
@@ -445,19 +500,27 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   app.post("/v1/carts/:id/checkout", async (request, reply) => {
     const staff = requireStaff(request);
     const { id } = cartIdParams.parse(request.params);
+    await requireCartAccess(id, staff);
     const idempotencyKey = idempotencyKeySchema.parse(request.headers["idempotency-key"]);
-    const order = await service.checkout(id, idempotencyKey, staff?.id);
+    const order = await service.checkout(id, idempotencyKey, staff?.id, staff?.scopeId);
     return reply.code(201).send(orderDto(order));
   });
 
   app.get("/v1/orders", async (request) => {
+    const staff = requireStaff(request);
     const query = z.object({
       search: z.string().trim().max(160).optional(),
       status: z.enum(orderStatuses).optional(),
       limit: z.coerce.number().int().min(1).max(200).default(50),
       offset: z.coerce.number().int().min(0).default(0)
     }).parse(request.query);
-    const orders = await service.listOrders(query.search, query.status, query.limit, query.offset);
+    const orders = await service.listOrders(
+      query.search,
+      query.status,
+      query.limit,
+      query.offset,
+      staff?.scopeId
+    );
     return {
       orders: orders.map(orderDto),
       page: { limit: query.limit, offset: query.offset, returned: orders.length }
@@ -465,12 +528,16 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
 
   app.get("/v1/orders/:id", async (request) => {
+    const staff = requireStaff(request);
     const { id } = orderIdParams.parse(request.params);
+    await requireOrderAccess(id, staff);
     return orderDto(await service.getOrder(id));
   });
 
   app.get("/v1/orders/:id/sale", async (request) => {
+    const staff = requireStaff(request);
     const { id } = orderIdParams.parse(request.params);
+    await requireOrderAccess(id, staff);
     const [order, payments] = await Promise.all([
       service.getOrder(id),
       service.listPaymentsForOrder(id)
@@ -492,6 +559,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     const staff = requireStaff(request);
     const { id } = orderIdParams.parse(request.params);
     const body = paymentAttemptSchema.parse(request.body);
+    await requireOrderAccess(id, staff);
     const idempotencyKey = idempotencyKeySchema.parse(request.headers["idempotency-key"]);
     const result = await service.startPayment({
       orderId: id,
@@ -507,7 +575,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
 
   app.get("/v1/payment-attempts/:id", async (request) => {
+    const staff = requireStaff(request);
     const { id } = attemptIdParams.parse(request.params);
+    await requireAttemptAccess(id, staff);
     const refresh = z.object({ refresh: z.enum(["true", "false"]).optional() })
       .parse(request.query).refresh !== "false";
     const result = await service.getPaymentAttempt(id, refresh);
@@ -515,12 +585,16 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
 
   app.post("/v1/payment-attempts/:id/cancel", async (request) => {
+    const staff = requireStaff(request);
     const { id } = attemptIdParams.parse(request.params);
+    await requireAttemptAccess(id, staff);
     return paymentAttemptDto(await service.cancelPaymentAttempt(id));
   });
 
   app.post("/v1/sandbox/vietnam-qr/:id/complete", async (request) => {
+    const staff = requireStaff(request);
     const { id } = attemptIdParams.parse(request.params);
+    await requireAttemptAccess(id, staff);
     const body = sandboxVietnamQrCompletionSchema.parse(request.body);
     const provider = providers.find(
       (candidate): candidate is SimulatedVietnamQrProvider => candidate instanceof SimulatedVietnamQrProvider
@@ -537,7 +611,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
 
   app.post("/v1/sandbox/vietnam-qr/:id/scan", async (request) => {
+    const staff = requireStaff(request);
     const { id } = attemptIdParams.parse(request.params);
+    await requireAttemptAccess(id, staff);
     const body = sandboxVietnamQrScanSchema.parse(request.body);
     const provider = providers.find(
       (candidate): candidate is SimulatedVietnamQrProvider => candidate instanceof SimulatedVietnamQrProvider
@@ -551,7 +627,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
 
   app.get("/v1/payments/:id", async (request) => {
+    const staff = requireStaff(request);
     const { id } = paymentIdParams.parse(request.params);
+    await requirePaymentAccess(id, staff);
     const payment = await service.getPayment(id);
     const attempt = await service.getPaymentAttempt(payment.paymentAttemptId, false);
     return paymentDto(payment, attempt.attempt);
@@ -565,6 +643,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     if (authEnabled) {
       const staff = requireStaff(request);
       if (!staff) throw new ApplicationError("Authentication is required", "UNAUTHORIZED", 401);
+      await requirePaymentAccess(id, staff);
       const approvalToken = z.string().trim().min(1).parse(request.headers["x-manager-approval"]);
       managerId = auth.verifyManagerApproval(
         approvalToken,
@@ -598,7 +677,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
 
   app.get("/v1/orders/:id/receipt", async (request) => {
+    const staff = requireStaff(request);
     const { id } = orderIdParams.parse(request.params);
+    await requireOrderAccess(id, staff);
     const order = await service.getOrder(id);
     const payments = await service.listPaymentsForOrder(id);
     const attempt = payments[0]
@@ -663,6 +744,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
 
   app.get("/v1/reconciliation/summary", async (request) => {
+    requireManager(request);
     const query = z.object({
       from: z.coerce.date(),
       to: z.coerce.date(),
@@ -723,6 +805,7 @@ function isPublicRoute(url: string): boolean {
     || path === "/ready"
     || path === "/v1/runtime-status"
     || path === "/v1/auth/login"
+    || path === "/v1/auth/guest"
     || path === "/v1/providers/simulated/webhooks";
 }
 

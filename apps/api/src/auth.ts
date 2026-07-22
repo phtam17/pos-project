@@ -8,6 +8,8 @@ export interface StaffSession {
   readonly id: string;
   readonly name: string;
   readonly role: StaffRole;
+  readonly scopeId: string;
+  readonly guest: boolean;
   readonly expiresAt: Date;
 }
 
@@ -16,6 +18,8 @@ interface SessionClaims {
   readonly sub: string;
   readonly name: string;
   readonly role: StaffRole;
+  readonly scopeId: string;
+  readonly guest: boolean;
   readonly exp: number;
   readonly nonce: string;
 }
@@ -27,6 +31,7 @@ interface ApprovalClaims {
   readonly paymentId: string;
   readonly amountMinor: string;
   readonly idempotencyKey: string;
+  readonly scopeId: string;
   readonly exp: number;
   readonly nonce: string;
 }
@@ -57,12 +62,47 @@ export class SandboxAuth {
       sub: credential.id,
       name: credential.name,
       role: credential.role,
+      scopeId: "shared",
+      guest: false,
       exp: expiresAt.getTime(),
       nonce: randomUUID()
     };
     return {
       token: this.sign(claims),
-      session: { id: credential.id, name: credential.name, role: credential.role, expiresAt }
+      session: {
+        id: credential.id,
+        name: credential.name,
+        role: credential.role,
+        scopeId: "shared",
+        guest: false,
+        expiresAt
+      }
+    };
+  }
+
+  createGuestSession(): { token: string; session: StaffSession } {
+    const nonce = randomUUID();
+    const expiresAt = new Date(this.now().getTime() + this.sessionDurationMs);
+    const session: StaffSession = {
+      id: `guest-${nonce.slice(0, 8)}`,
+      name: "Sandbox Guest",
+      role: "CASHIER",
+      scopeId: `guest:${nonce}`,
+      guest: true,
+      expiresAt
+    };
+    return {
+      token: this.sign({
+        kind: "session",
+        sub: session.id,
+        name: session.name,
+        role: session.role,
+        scopeId: session.scopeId,
+        guest: true,
+        exp: expiresAt.getTime(),
+        nonce
+      }),
+      session
     };
   }
 
@@ -73,6 +113,8 @@ export class SandboxAuth {
       id: claims.sub,
       name: claims.name,
       role: claims.role,
+      scopeId: claims.scopeId,
+      guest: claims.guest,
       expiresAt: new Date(claims.exp)
     };
   }
@@ -98,6 +140,7 @@ export class SandboxAuth {
         paymentId: input.paymentId,
         amountMinor: input.amountMinor,
         idempotencyKey: input.idempotencyKey,
+        scopeId: input.requestedBy.scopeId,
         exp: expiresAt.getTime(),
         nonce: randomUUID()
       }),
@@ -119,7 +162,8 @@ export class SandboxAuth {
       claims.requestedBy !== session.id ||
       claims.paymentId !== paymentId ||
       claims.amountMinor !== amountMinor ||
-      claims.idempotencyKey !== idempotencyKey
+      claims.idempotencyKey !== idempotencyKey ||
+      claims.scopeId !== session.scopeId
     ) {
       throw new ApplicationError("Manager approval does not match this refund", "FORBIDDEN", 403);
     }
@@ -173,14 +217,17 @@ function isClaims(value: unknown): value is TokenClaims {
   if (typeof claims.exp !== "number" || typeof claims.nonce !== "string") return false;
   if (claims.kind === "session") {
     return typeof claims.sub === "string" && typeof claims.name === "string"
-      && (claims.role === "CASHIER" || claims.role === "MANAGER");
+      && (claims.role === "CASHIER" || claims.role === "MANAGER")
+      && typeof claims.scopeId === "string"
+      && typeof claims.guest === "boolean";
   }
   return claims.kind === "manager_approval"
     && typeof claims.approvedBy === "string"
     && typeof claims.requestedBy === "string"
     && typeof claims.paymentId === "string"
     && typeof claims.amountMinor === "string"
-    && typeof claims.idempotencyKey === "string";
+    && typeof claims.idempotencyKey === "string"
+    && typeof claims.scopeId === "string";
 }
 
 function unauthorized(): ApplicationError {

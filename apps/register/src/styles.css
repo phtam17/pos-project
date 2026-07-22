@@ -328,6 +328,11 @@ button:disabled {
 .login-heading > p:last-child { margin: 8px 0 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
 .login-submit { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 44px; color: #fff; background: var(--green); border: 1px solid var(--green); border-radius: 9px; font-size: 10px; font-weight: 800; }
 .login-submit svg { width: 14px; height: 14px; }
+.guest-demo-entry { display: grid; gap: 7px; margin-bottom: 18px; }
+.guest-demo-entry small { color: var(--muted); font-size: 8px; line-height: 1.45; text-align: center; }
+.login-divider { display: flex; align-items: center; gap: 10px; margin: 2px 0 16px; color: var(--muted); font-size: 8px; font-weight: 750; text-transform: uppercase; }
+.login-divider::before,
+.login-divider::after { content: ""; flex: 1; height: 1px; background: #e3e8e5; }
 .demo-credentials { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 20px; padding-top: 17px; border-top: 1px solid #e3e8e5; }
 .demo-credentials > span { grid-column: 1 / -1; color: var(--muted); font-size: 8px; font-weight: 750; text-transform: uppercase; }
 .demo-credentials button { display: grid; gap: 3px; padding: 10px; text-align: left; background: #f7f9f8; border: 1px solid #dfe5e2; border-radius: 9px; }

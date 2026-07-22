@@ -285,13 +285,14 @@ export class PostgresPosRepository implements PosRepository {
     return MerchantSettings.rehydrate(snapshot);
   }
 
-  async createCart(cart: Cart): Promise<Cart> {
+  async createCart(cart: Cart, scopeId = "shared"): Promise<Cart> {
     try {
       await this.withClientTransaction(async (client) => {
         const snapshot = cart.toSnapshot();
         await client.query(
-          `INSERT INTO carts (id, status, currency, version, snapshot, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          `INSERT INTO carts
+            (id, status, currency, version, snapshot, created_at, updated_at, sandbox_scope_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
           [
             cart.id,
             snapshot.status,
@@ -299,7 +300,8 @@ export class PostgresPosRepository implements PosRepository {
             snapshot.version,
             encodeAggregate(cart),
             snapshot.createdAt,
-            snapshot.updatedAt
+            snapshot.updatedAt,
+            scopeId
           ]
         );
         await this.insertCartLines(client, cart.id, snapshot.lines);
@@ -310,8 +312,14 @@ export class PostgresPosRepository implements PosRepository {
     }
   }
 
-  async getCart(id: string): Promise<Cart | undefined> {
-    return this.getAggregate("carts", id, Cart);
+  async getCart(id: string, scopeId?: string): Promise<Cart | undefined> {
+    const result = await this.query<SnapshotRow>(
+      `SELECT snapshot FROM carts
+        WHERE id = $1 AND ($2::text IS NULL OR sandbox_scope_id = $2)`,
+      [id, scopeId ?? null]
+    );
+    const row = result.rows[0];
+    return row === undefined ? undefined : decodeAggregate(row.snapshot, Cart);
   }
 
   async saveCart(cart: Cart, expectedVersion?: number): Promise<Cart> {
@@ -354,7 +362,7 @@ export class PostgresPosRepository implements PosRepository {
     }
   }
 
-  async createOrder(order: Order): Promise<Order> {
+  async createOrder(order: Order, scopeId = "shared"): Promise<Order> {
     try {
       await this.withClientTransaction(async (client) => {
         const snapshot = order.toSnapshot();
@@ -362,8 +370,8 @@ export class PostgresPosRepository implements PosRepository {
           `INSERT INTO orders
             (id, order_number, cart_id, status, currency, subtotal_minor,
              discount_minor, tax_minor, tip_minor, total_minor, version, snapshot,
-             created_at, updated_at, completed_at)
-           VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+             created_at, updated_at, completed_at, sandbox_scope_id)
+           VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
           [
             order.id,
             snapshot.cartId,
@@ -380,7 +388,8 @@ export class PostgresPosRepository implements PosRepository {
             snapshot.updatedAt,
             ["PAID", "CANCELED", "REFUNDED"].includes(snapshot.status)
               ? snapshot.updatedAt
-              : null
+              : null,
+            scopeId
           ]
         );
         await this.insertOrderLines(client, order.id, snapshot.lines);
@@ -394,6 +403,10 @@ export class PostgresPosRepository implements PosRepository {
   async listOrders(query: OrderQuery = {}): Promise<readonly Order[]> {
     const values: unknown[] = [];
     const conditions: string[] = [];
+    if (query.scopeId !== undefined) {
+      values.push(query.scopeId);
+      conditions.push(`orders.sandbox_scope_id = $${values.length}`);
+    }
     if (query.status !== undefined) {
       values.push(query.status);
       conditions.push(`orders.status = $${values.length}`);
@@ -425,14 +438,21 @@ export class PostgresPosRepository implements PosRepository {
     return result.rows.map((row) => decodeAggregate(row.snapshot, Order));
   }
 
-  async getOrder(id: string): Promise<Order | undefined> {
-    return this.getAggregate("orders", id, Order);
+  async getOrder(id: string, scopeId?: string): Promise<Order | undefined> {
+    const result = await this.query<SnapshotRow>(
+      `SELECT snapshot FROM orders
+        WHERE id = $1 AND ($2::text IS NULL OR sandbox_scope_id = $2)`,
+      [id, scopeId ?? null]
+    );
+    const row = result.rows[0];
+    return row === undefined ? undefined : decodeAggregate(row.snapshot, Order);
   }
 
-  async findOrderByCartId(cartId: string): Promise<Order | undefined> {
+  async findOrderByCartId(cartId: string, scopeId?: string): Promise<Order | undefined> {
     const result = await this.query<SnapshotRow>(
-      "SELECT snapshot FROM orders WHERE cart_id = $1",
-      [cartId]
+      `SELECT snapshot FROM orders
+        WHERE cart_id = $1 AND ($2::text IS NULL OR sandbox_scope_id = $2)`,
+      [cartId, scopeId ?? null]
     );
     const row = result.rows[0];
     return row === undefined ? undefined : decodeAggregate(row.snapshot, Order);

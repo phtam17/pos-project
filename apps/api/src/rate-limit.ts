@@ -22,6 +22,7 @@ export function createRateLimitHook(options: RateLimitOptions) {
     const path = request.url.split("?", 1)[0] ?? request.url;
     if (request.method === "OPTIONS" || path === "/health" || path === "/ready") return;
     const credentialAttempt = path === "/v1/auth/login"
+      || path === "/v1/auth/guest"
       || path === "/v1/auth/manager-approvals";
     const maximum = credentialAttempt ? options.loginMax : options.generalMax;
     const windowMs = credentialAttempt ? options.loginWindowMs : options.generalWindowMs;

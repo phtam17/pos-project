@@ -8,6 +8,7 @@ export interface StaffDto {
   id: string;
   name: string;
   role: StaffRole;
+  guest: boolean;
 }
 
 export interface AuthSessionDto {
@@ -120,7 +121,7 @@ export interface RuntimeStatusDto {
     card: { ready: boolean; provider?: string };
     vietnamQr: { ready: boolean; provider?: string };
   };
-  auth: { enabled: boolean; publicSandbox: boolean };
+  auth: { enabled: boolean; publicSandbox: boolean; guestAccess: boolean };
   demoReset: { enabled: boolean; automatic: boolean; nextAt?: string; lastAt?: string };
   warnings: string[];
   checkedAt: string;
@@ -375,7 +376,8 @@ function normalizeRuntimeStatus(value: unknown): RuntimeStatusDto {
     },
     auth: {
       enabled: auth.enabled !== false,
-      publicSandbox: auth.publicSandbox === true
+      publicSandbox: auth.publicSandbox === true,
+      guestAccess: auth.guestAccess === true
     },
     demoReset: {
       enabled: demoReset.enabled !== false,
@@ -396,7 +398,7 @@ function normalizeStaff(value: unknown): StaffDto | undefined {
   if (!optionalText(source.id) || !optionalText(source.name) || (role !== "CASHIER" && role !== "MANAGER")) {
     return undefined;
   }
-  return { id: text(source.id), name: text(source.name), role };
+  return { id: text(source.id), name: text(source.name), role, guest: source.guest === true };
 }
 
 function normalizeSession(value: unknown): AuthSessionDto | undefined {
@@ -761,6 +763,15 @@ export const api = {
       body: JSON.stringify({ staffId, pin })
     }));
     if (!session) throw new ApiError("The login response was invalid.", 502, "INVALID_RESPONSE");
+    storeSession(session);
+    return session;
+  },
+
+  async startGuestSession(): Promise<AuthSessionDto> {
+    const session = normalizeSession(await request("/v1/auth/guest", {
+      method: "POST"
+    }));
+    if (!session) throw new ApiError("The guest session response was invalid.", 502, "INVALID_RESPONSE");
     storeSession(session);
     return session;
   },

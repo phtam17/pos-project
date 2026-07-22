@@ -235,6 +235,7 @@ function LoginScreen({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const showLocalCredentials = runtimeStatus !== null && !runtimeStatus.auth.publicSandbox;
+  const guestAccess = runtimeStatus?.auth.guestAccess === true;
 
   const submit = async () => {
     if (!staffId.trim() || !pin) {
@@ -252,12 +253,31 @@ function LoginScreen({
     }
   };
 
+  const enterGuestDemo = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      onSignedIn(await api.startGuestSession());
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <main className="login-page">
       <section className="login-card" aria-labelledby="login-title">
         <div className="login-brand"><div className="brand-mark" aria-hidden="true"><span /><span /><span /><span /></div><div><strong>Open POS</strong><span>Staff access</span></div></div>
         <div className="sandbox-login-badge"><Icon name="lock" /> Sandbox simulation only · no real money</div>
-        <div className="login-heading"><p className="eyebrow">Register sign in</p><h1 id="login-title">Welcome back</h1><p>Sign in as a cashier to run sales or as a manager to configure the demo.</p></div>
+        <div className="login-heading"><p className="eyebrow">{guestAccess ? "Public sandbox" : "Register sign in"}</p><h1 id="login-title">{guestAccess ? "Try Open POS" : "Welcome back"}</h1><p>{guestAccess ? "Start an isolated guest session. Your sandbox sales are separated from other visitors and expire automatically." : "Sign in as a cashier to run sales or as a manager to configure the demo."}</p></div>
+        {guestAccess && (
+          <div className="guest-demo-entry">
+            <button className="login-submit" type="button" onClick={() => void enterGuestDemo()} disabled={busy}>{busy ? <span className="spinner" /> : <Icon name="card" />}Enter sandbox demo</button>
+            <small>No account, real payment, or personal information required.</small>
+          </div>
+        )}
+        {guestAccess && <div className="login-divider"><span>Staff sign-in</span></div>}
         <form onSubmit={(event) => { event.preventDefault(); void submit(); }}>
           <label className="field-label">Staff ID<input autoFocus autoComplete="username" value={staffId} onChange={(event) => setStaffId(event.target.value)} disabled={busy} /></label>
           <label className="field-label">PIN<input type="password" inputMode="numeric" autoComplete="current-password" value={pin} onChange={(event) => setPin(event.target.value)} disabled={busy} /></label>
@@ -1666,7 +1686,7 @@ export function App() {
           <span className="header-time">{new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(now)}</span>
           <EnvironmentStatus status={runtimeStatus} open={environmentOpen} onToggle={() => setEnvironmentOpen((current) => !current)} />
           <span className="reader-pill"><Icon name="signal" /> {runtimeStatus?.simulators.card.ready === false ? "Reader unavailable" : "Reader ready"}</span>
-          {session && <div className="staff-pill"><span><strong>{session.staff.name}</strong><small>{session.staff.role.toLocaleLowerCase()}</small></span><button type="button" onClick={signOut} aria-label="Sign out">Sign out</button></div>}
+          {session && <div className="staff-pill"><span><strong>{session.staff.name}</strong><small>{session.staff.guest ? "isolated guest" : session.staff.role.toLocaleLowerCase()}</small></span><button type="button" onClick={signOut} aria-label="Sign out">Sign out</button></div>}
         </div>
       </header>
 

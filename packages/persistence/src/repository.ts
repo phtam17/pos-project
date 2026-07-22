@@ -43,6 +43,8 @@ export interface ProductQuery {
 export interface OrderQuery {
   readonly search?: string;
   readonly status?: OrderStatus;
+  /** Restricts sandbox transaction history to one signed visitor session. */
+  readonly scopeId?: string;
   readonly limit?: number;
   readonly offset?: number;
 }
@@ -109,14 +111,14 @@ export interface PosRepository {
   getMerchantSettings(): Promise<MerchantSettings>;
   saveMerchantSettings(settings: MerchantSettings): Promise<MerchantSettings>;
 
-  createCart(cart: Cart): Promise<Cart>;
-  getCart(id: string): Promise<Cart | undefined>;
+  createCart(cart: Cart, scopeId?: string): Promise<Cart>;
+  getCart(id: string, scopeId?: string): Promise<Cart | undefined>;
   saveCart(cart: Cart, expectedVersion?: number): Promise<Cart>;
 
-  createOrder(order: Order): Promise<Order>;
+  createOrder(order: Order, scopeId?: string): Promise<Order>;
   listOrders(query?: OrderQuery): Promise<readonly Order[]>;
-  getOrder(id: string): Promise<Order | undefined>;
-  findOrderByCartId(cartId: string): Promise<Order | undefined>;
+  getOrder(id: string, scopeId?: string): Promise<Order | undefined>;
+  findOrderByCartId(cartId: string, scopeId?: string): Promise<Order | undefined>;
   saveOrder(order: Order, expectedVersion?: number): Promise<Order>;
 
   createPaymentAttempt(attempt: PaymentAttempt): Promise<PaymentAttempt>;

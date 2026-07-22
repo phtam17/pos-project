@@ -158,7 +158,9 @@ export class MemoryPosRepository implements PosRepository {
   private readonly products = new Map<string, Product>();
   private merchantSettings = MerchantSettings.defaults();
   private readonly carts = new Map<string, Cart>();
+  private readonly cartScopes = new Map<string, string>();
   private readonly orders = new Map<string, Order>();
+  private readonly orderScopes = new Map<string, string>();
   private readonly paymentAttempts = new Map<string, PaymentAttempt>();
   private readonly payments = new Map<string, Payment>();
   private readonly refunds = new Map<string, Refund>();
@@ -181,7 +183,9 @@ export class MemoryPosRepository implements PosRepository {
       products: cloneMap(this.products, cloneAggregate),
       merchantSettings: cloneAggregate(this.merchantSettings),
       carts: cloneMap(this.carts, cloneAggregate),
+      cartScopes: new Map(this.cartScopes),
       orders: cloneMap(this.orders, cloneAggregate),
+      orderScopes: new Map(this.orderScopes),
       paymentAttempts: cloneMap(this.paymentAttempts, cloneAggregate),
       payments: cloneMap(this.payments, cloneAggregate),
       refunds: cloneMap(this.refunds, cloneAggregate),
@@ -199,7 +203,9 @@ export class MemoryPosRepository implements PosRepository {
       restoreMap(this.products, snapshot.products);
       this.merchantSettings = snapshot.merchantSettings;
       restoreMap(this.carts, snapshot.carts);
+      restoreMap(this.cartScopes, snapshot.cartScopes);
       restoreMap(this.orders, snapshot.orders);
+      restoreMap(this.orderScopes, snapshot.orderScopes);
       restoreMap(this.paymentAttempts, snapshot.paymentAttempts);
       restoreMap(this.payments, snapshot.payments);
       restoreMap(this.refunds, snapshot.refunds);
@@ -302,11 +308,14 @@ export class MemoryPosRepository implements PosRepository {
     return MerchantSettings.rehydrate(settings.toSnapshot());
   }
 
-  async createCart(cart: Cart): Promise<Cart> {
-    return this.create(this.carts, "Cart", cart);
+  async createCart(cart: Cart, scopeId = "shared"): Promise<Cart> {
+    const created = await this.create(this.carts, "Cart", cart);
+    this.cartScopes.set(cart.id, scopeId);
+    return created;
   }
 
-  async getCart(id: string): Promise<Cart | undefined> {
+  async getCart(id: string, scopeId?: string): Promise<Cart | undefined> {
+    if (scopeId !== undefined && this.cartScopes.get(id) !== scopeId) return undefined;
     return this.get(this.carts, id);
   }
 
@@ -321,7 +330,7 @@ export class MemoryPosRepository implements PosRepository {
     return cloneAggregate(cart);
   }
 
-  async createOrder(order: Order): Promise<Order> {
+  async createOrder(order: Order, scopeId = "shared"): Promise<Order> {
     const cartId = textField(order, "cartId");
     if (
       cartId !== undefined &&
@@ -329,7 +338,9 @@ export class MemoryPosRepository implements PosRepository {
     ) {
       throw new RepositoryConflictError("Order cart", cartId);
     }
-    return this.create(this.orders, "Order", order);
+    const created = await this.create(this.orders, "Order", order);
+    this.orderScopes.set(order.id, scopeId);
+    return created;
   }
 
   async listOrders(query: OrderQuery = {}): Promise<readonly Order[]> {
@@ -337,6 +348,7 @@ export class MemoryPosRepository implements PosRepository {
     const offset = Math.max(0, query.offset ?? 0);
     const limit = Math.max(0, query.limit ?? 100);
     return [...this.orders.values()]
+      .filter((order) => query.scopeId === undefined || this.orderScopes.get(order.id) === query.scopeId)
       .filter((order) => !query.status || textField(order, "status") === query.status)
       .filter((order) => {
         if (!search) return true;
@@ -355,13 +367,15 @@ export class MemoryPosRepository implements PosRepository {
       .map(cloneAggregate);
   }
 
-  async getOrder(id: string): Promise<Order | undefined> {
+  async getOrder(id: string, scopeId?: string): Promise<Order | undefined> {
+    if (scopeId !== undefined && this.orderScopes.get(id) !== scopeId) return undefined;
     return this.get(this.orders, id);
   }
 
-  async findOrderByCartId(cartId: string): Promise<Order | undefined> {
+  async findOrderByCartId(cartId: string, scopeId?: string): Promise<Order | undefined> {
     const order = [...this.orders.values()].find(
-      (candidate) => textField(candidate, "cartId") === cartId
+      (candidate) => textField(candidate, "cartId") === cartId &&
+        (scopeId === undefined || this.orderScopes.get(candidate.id) === scopeId)
     );
     return order === undefined ? undefined : cloneAggregate(order);
   }
@@ -701,7 +715,9 @@ export class MemoryPosRepository implements PosRepository {
 
   async resetDemoData(): Promise<void> {
     this.carts.clear();
+    this.cartScopes.clear();
     this.orders.clear();
+    this.orderScopes.clear();
     this.paymentAttempts.clear();
     this.payments.clear();
     this.refunds.clear();

@@ -246,10 +246,10 @@ export class PosService {
     return settings;
   }
 
-  async createCart(currency?: string, actorId?: string): Promise<Cart> {
+  async createCart(currency?: string, actorId?: string, scopeId?: string): Promise<Cart> {
     const selectedCurrency = currency ?? (await this.repository.getMerchantSettings()).currency;
     const cart = new Cart({ id: randomUUID(), currency: selectedCurrency });
-    await this.repository.createCart(cart);
+    await this.repository.createCart(cart, scopeId);
     await this.record("Cart", cart.id, "CART_CREATED", { currency: cart.currency }, actorId ?? null);
     return cart;
   }
@@ -328,11 +328,17 @@ export class PosService {
     return cart;
   }
 
-  async checkout(cartId: string, idempotencyKey: string, actorId?: string): Promise<Order> {
+  async checkout(
+    cartId: string,
+    idempotencyKey: string,
+    actorId?: string,
+    scopeId?: string
+  ): Promise<Order> {
     const scope = `cart-checkout:${cartId}`;
     const requestHash = hashRequest({ cartId });
-    const cart = await this.getCart(cartId);
-    const previouslyCreated = await this.repository.findOrderByCartId(cartId);
+    const cart = await this.repository.getCart(cartId, scopeId);
+    if (!cart) throw notFound("Cart", cartId);
+    const previouslyCreated = await this.repository.findOrderByCartId(cartId, scopeId);
     if (previouslyCreated) return previouslyCreated;
     if (cart.status === "OPEN") {
       const expectedVersion = cart.version;
@@ -357,17 +363,17 @@ export class PosService {
       const replayedOrder = await this.repository.getOrder(resourceId);
       if (replayedOrder) return replayedOrder;
       const repairedOrder = Order.fromCart(resourceId, cart, this.now());
-      await this.repository.createOrder(repairedOrder);
+      await this.repository.createOrder(repairedOrder, scopeId);
       await this.completeIdempotency(scope, idempotencyKey, requestHash, repairedOrder.id);
       return repairedOrder;
     }
     const order = Order.fromCart(proposedOrderId, cart, this.now());
     try {
-      await this.repository.createOrder(order);
+      await this.repository.createOrder(order, scopeId);
     } catch (error) {
       // A different API process/key may have converted this cart after our
       // pre-check. The cart can have only one immutable order snapshot.
-      const concurrentOrder = await this.repository.findOrderByCartId(cartId);
+      const concurrentOrder = await this.repository.findOrderByCartId(cartId, scopeId);
       if (!concurrentOrder) throw error;
       await this.completeIdempotency(
         scope,
@@ -394,11 +400,13 @@ export class PosService {
     search?: string,
     status?: OrderStatus,
     limit = 100,
-    offset = 0
+    offset = 0,
+    scopeId?: string
   ): Promise<readonly Order[]> {
     return this.repository.listOrders({
       limit,
       offset,
+      ...(scopeId ? { scopeId } : {}),
       ...(search ? { search } : {}),
       ...(status ? { status } : {})
     });

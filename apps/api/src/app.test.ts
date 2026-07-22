@@ -1462,6 +1462,110 @@ describe("POS API vertical slice", () => {
       .json<{ products: unknown[] }>().products.length).toBeGreaterThan(0);
   });
 
+  it("creates isolated public guest sessions and blocks cross-visitor access", async () => {
+    const publicConfig: ApiConfig = {
+      ...config,
+      publicSandbox: true,
+      authEnabled: true,
+      authSecret: "public-guest-test-auth-secret-long-enough-for-tests",
+      staffCredentials: [
+        { id: "cashier-01", name: "Test Cashier", role: "CASHIER", pin: "123456" },
+        { id: "manager-01", name: "Test Manager", role: "MANAGER", pin: "246810" }
+      ],
+      demoResetEnabled: true,
+      demoResetIntervalMinutes: 60
+    };
+    const instance = await buildApp({ config: publicConfig, logger: false });
+    openApps.push(instance);
+
+    const startGuest = async () => {
+      const response = await instance.inject({ method: "POST", url: "/v1/auth/guest" });
+      expect(response.statusCode).toBe(200);
+      return response.json<{ token: string; staff: { guest: boolean; role: string } }>();
+    };
+    const guestA = await startGuest();
+    const guestB = await startGuest();
+    expect(guestA.staff).toMatchObject({ guest: true, role: "CASHIER" });
+    expect(guestB.token).not.toBe(guestA.token);
+    const headersA = { authorization: `Bearer ${guestA.token}` };
+    const headersB = { authorization: `Bearer ${guestB.token}` };
+
+    const products = (await instance.inject({
+      method: "GET",
+      url: "/v1/products",
+      headers: headersA
+    })).json<{ products: Array<{ id: string }> }>().products;
+    const productId = products[0]!.id;
+    const cartA = (await instance.inject({
+      method: "POST",
+      url: "/v1/carts",
+      headers: headersA,
+      payload: {}
+    })).json<{ id: string }>();
+
+    expect((await instance.inject({
+      method: "GET",
+      url: `/v1/carts/${cartA.id}`,
+      headers: headersB
+    })).statusCode).toBe(404);
+    expect((await instance.inject({
+      method: "POST",
+      url: `/v1/carts/${cartA.id}/lines`,
+      headers: headersB,
+      payload: { productId, quantity: 1 }
+    })).statusCode).toBe(404);
+
+    await instance.inject({
+      method: "POST",
+      url: `/v1/carts/${cartA.id}/lines`,
+      headers: headersA,
+      payload: { productId, quantity: 1 }
+    });
+    const orderAResponse = await instance.inject({
+      method: "POST",
+      url: `/v1/carts/${cartA.id}/checkout`,
+      headers: { ...headersA, "idempotency-key": "guest-a-checkout" }
+    });
+    expect(orderAResponse.statusCode).toBe(201);
+    const orderA = orderAResponse.json<{ id: string }>();
+    const paymentAResponse = await instance.inject({
+      method: "POST",
+      url: `/v1/orders/${orderA.id}/payment-attempts`,
+      headers: { ...headersA, "idempotency-key": "guest-a-payment" },
+      payload: { tender: "card", terminalId: "guest-reader" }
+    });
+    expect(paymentAResponse.statusCode).toBe(201);
+    const paymentA = paymentAResponse.json<{ id: string; paymentId: string }>();
+
+    const ordersA = (await instance.inject({
+      method: "GET",
+      url: "/v1/orders",
+      headers: headersA
+    })).json<{ orders: Array<{ id: string }> }>().orders;
+    const ordersB = (await instance.inject({
+      method: "GET",
+      url: "/v1/orders",
+      headers: headersB
+    })).json<{ orders: Array<{ id: string }> }>().orders;
+    expect(ordersA.map((order) => order.id)).toEqual([orderA.id]);
+    expect(ordersB).toEqual([]);
+
+    for (const url of [
+      `/v1/orders/${orderA.id}`,
+      `/v1/orders/${orderA.id}/sale`,
+      `/v1/orders/${orderA.id}/receipt`,
+      `/v1/payment-attempts/${paymentA.id}`,
+      `/v1/payments/${paymentA.paymentId}`
+    ]) {
+      expect((await instance.inject({ method: "GET", url, headers: headersB })).statusCode).toBe(404);
+    }
+    expect((await instance.inject({
+      method: "GET",
+      url: "/v1/reconciliation/summary?from=2026-01-01&to=2027-01-01&currency=USD",
+      headers: headersA
+    })).statusCode).toBe(403);
+  });
+
   it("rate limits repeated staff login attempts", async () => {
     const instance = await buildApp({
       config: {
