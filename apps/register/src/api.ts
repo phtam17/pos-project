@@ -164,6 +164,11 @@ export interface OrderDto {
   tipMinor: AmountMinor;
   totalMinor: AmountMinor;
   createdAt?: string;
+  payment?: PaymentAttemptDto;
+  paymentStatus?: string;
+  refundStatus?: "NONE" | "PENDING" | "PARTIAL" | "FULL";
+  refundedMinor?: AmountMinor;
+  remainingMinor?: AmountMinor;
 }
 
 export interface PaymentAttemptDto {
@@ -483,6 +488,14 @@ function normalizeOrder(value: unknown): OrderDto {
   const source = record(envelope(value, ["order"]));
   const cartShape = normalizeCart(source);
   const optionalCreatedAt = optionalText(source.createdAt ?? source.capturedAt);
+  const paymentSource = record(source.payment);
+  const payment = optionalText(paymentSource.id) ? normalizePayment(paymentSource) : undefined;
+  const paymentStatus = optionalText(source.paymentStatus)?.toUpperCase();
+  const refundStatusValue = optionalText(source.refundStatus)?.toUpperCase();
+  const refundStatus = refundStatusValue === "NONE" || refundStatusValue === "PENDING"
+    || refundStatusValue === "PARTIAL" || refundStatusValue === "FULL"
+    ? refundStatusValue
+    : undefined;
 
   return {
     id: text(source.id),
@@ -495,7 +508,12 @@ function normalizeOrder(value: unknown): OrderDto {
     taxMinor: cartShape.taxMinor,
     tipMinor: cartShape.tipMinor,
     totalMinor: cartShape.totalMinor,
-    ...(optionalCreatedAt ? { createdAt: optionalCreatedAt } : {})
+    ...(optionalCreatedAt ? { createdAt: optionalCreatedAt } : {}),
+    ...(payment ? { payment } : {}),
+    ...(paymentStatus ? { paymentStatus } : {}),
+    ...(refundStatus ? { refundStatus } : {}),
+    ...(source.refundedMinor !== undefined ? { refundedMinor: amount(source.refundedMinor) } : {}),
+    ...(source.remainingMinor !== undefined ? { remainingMinor: amount(source.remainingMinor) } : {})
   };
 }
 
@@ -537,7 +555,7 @@ function normalizePayment(value: unknown): PaymentAttemptDto {
   const optionalBrand = optionalText(source.cardBrand ?? source.brand);
   const optionalLast4 = optionalText(source.last4);
   const optionalFailure = optionalText(source.failureMessage ?? source.message);
-  const optionalCreatedAt = optionalText(source.createdAt);
+  const optionalCreatedAt = optionalText(source.createdAt ?? source.capturedAt);
   const tenderValue = text(source.tender, "card").toLowerCase();
   const presentation = record(source.presentation);
   const walletDetails = record(source.wallet);

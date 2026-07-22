@@ -2015,8 +2015,10 @@ h2 {
 }
 
 .order-status-dot.status-refunded,
+.order-status-dot.status-partially_refunded,
 .order-status-dot.status-canceled { color: #87512c; background: #fff2e9; }
-.order-status-dot.status-payment_pending { color: var(--amber); background: #fff7e7; }
+.order-status-dot.status-payment_pending,
+.order-status-dot.status-refund_pending { color: var(--amber); background: #fff7e7; }
 .order-status-dot svg { width: 16px; height: 16px; }
 
 .order-row-copy,
@@ -2047,9 +2049,11 @@ h2 {
 }
 
 .status-badge.status-refunded,
+.status-badge.status-partially_refunded,
 .status-badge.status-canceled,
 .status-badge.status-failed { color: #7b462e; background: #fff0e9; }
 .status-badge.status-payment_pending,
+.status-badge.status-refund_pending,
 .status-badge.status-pending { color: #75501e; background: #fff4d9; }
 .status-badge.status-succeeded { color: #28634b; background: #e8f4ee; }
 

@@ -401,8 +401,12 @@ describe("POS API vertical slice", () => {
       method: "GET",
       url: `/v1/orders/${orderId}/receipt`
     });
-    expect(refundedReceipt.json<{ vietnamQr: { timeline: Array<{ type: string }> } }>()
-      .vietnamQr.timeline.at(-1)?.type).toBe("REFUNDED");
+    expect(refundedReceipt.json<{
+      vietnamQr: { timeline: Array<{ type: string; description: string }> };
+    }>().vietnamQr.timeline.at(-1)).toMatchObject({
+      type: "REFUNDED",
+      description: "Refunded $0.50"
+    });
   });
 
   it("resolves an UNKNOWN attempt by replaying the original idempotent request", async () => {
@@ -1241,8 +1245,19 @@ describe("POS API vertical slice", () => {
       url: "/v1/orders?status=PAID&search=history%20test&limit=10"
     });
     expect(listed.statusCode).toBe(200);
-    expect(listed.json<{ orders: Array<{ id: string }> }>().orders.map((item) => item.id))
-      .toContain(order.id);
+    expect(listed.json<{
+      orders: Array<{
+        id: string;
+        payment: { tender: string; cardBrand: string };
+        refundStatus: string;
+        refundedMinor: string;
+      }>;
+    }>().orders).toContainEqual(expect.objectContaining({
+      id: order.id,
+      payment: expect.objectContaining({ tender: "card" }),
+      refundStatus: "NONE",
+      refundedMinor: "0"
+    }));
 
     const refund = (key: string, amountMinor: string) => instance.inject({
       method: "POST" as const,
@@ -1262,6 +1277,18 @@ describe("POS API vertical slice", () => {
     const partialReceipt = await instance.inject({ method: "GET", url: `/v1/orders/${order.id}/receipt` });
     expect(partialReceipt.json<{ refundStatus: string; refundedMinor: string; remainingMinor: string }>())
       .toMatchObject({ refundStatus: "PARTIAL", refundedMinor: "250", remainingMinor: "750" });
+    const partiallyRefundedOrders = await instance.inject({
+      method: "GET",
+      url: "/v1/orders?status=PAID"
+    });
+    expect(partiallyRefundedOrders.json<{
+      orders: Array<{ id: string; status: string; refundStatus: string; remainingMinor: string }>;
+    }>().orders).toContainEqual(expect.objectContaining({
+      id: order.id,
+      status: "PAID",
+      refundStatus: "PARTIAL",
+      remainingMinor: "750"
+    }));
 
     expect((await refund("history-full-refund", "750")).statusCode).toBe(201);
     const fullReceipt = await instance.inject({ method: "GET", url: `/v1/orders/${order.id}/receipt` });

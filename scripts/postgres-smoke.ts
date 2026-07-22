@@ -70,6 +70,8 @@ try {
   const cartResponse = await app.inject({ method: "POST", url: "/v1/carts", payload: {} });
   assert.equal(cartResponse.statusCode, 201);
   const cartId = cartResponse.json<{ id: string }>().id;
+  assert.ok(await repository.getCart(cartId, "shared"));
+  assert.equal(await repository.getCart(cartId, "guest:another-session"), undefined);
 
   const lineResponse = await app.inject({
     method: "POST",
@@ -98,6 +100,8 @@ try {
   });
   assert.equal(checkoutResponse.statusCode, 201);
   const orderId = checkoutResponse.json<{ id: string }>().id;
+  assert.ok(await repository.getOrder(orderId, "shared"));
+  assert.equal(await repository.getOrder(orderId, "guest:another-session"), undefined);
 
   const paymentResponse = await app.inject({
     method: "POST",
@@ -113,11 +117,18 @@ try {
     url: `/v1/orders?status=PAID&search=${encodeURIComponent(orderId.slice(0, 8))}`
   });
   assert.equal(orderHistoryResponse.statusCode, 200, orderHistoryResponse.body);
-  assert.ok(
-    orderHistoryResponse.json<{ orders: Array<{ id: string }> }>().orders
-      .some((order) => order.id === orderId),
-    "captured order should be searchable in PostgreSQL history"
-  );
+  assert.ok(orderHistoryResponse.json<{
+    orders: Array<{
+      id: string;
+      payment: { tender: string };
+      refundStatus: string;
+      refundedMinor: string;
+    }>;
+  }>().orders.some((order) => order.id === orderId
+    && order.payment.tender === "cash"
+    && order.refundStatus === "NONE"
+    && order.refundedMinor === "0"),
+  "captured order summary should persist its tender and refund totals");
 
   const receiptResponse = await app.inject({
     method: "GET",

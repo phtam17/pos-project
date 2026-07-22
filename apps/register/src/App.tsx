@@ -214,6 +214,88 @@ function makeIdempotencyKey(): string {
   return `register-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+function itemCountLabel(count: number): string {
+  return `${count} ${count === 1 ? "item" : "items"}`;
+}
+
+function focusableElements(container: HTMLElement): HTMLElement[] {
+  return Array.from(container.querySelectorAll<HTMLElement>(
+    'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+  )).filter((element) => element.getClientRects().length > 0);
+}
+
+function useDialogFocus(
+  onClose: () => void,
+  closeBlocked: boolean,
+  initialFocus: { readonly current: HTMLElement | null }
+) {
+  const dialog = useRef<HTMLElement>(null);
+  const closeRef = useRef(onClose);
+  const blockedRef = useRef(closeBlocked);
+  const initialFocusRef = useRef(initialFocus);
+  closeRef.current = onClose;
+  blockedRef.current = closeBlocked;
+  initialFocusRef.current = initialFocus;
+
+  useEffect(() => {
+    const previouslyFocused = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    const focusTimer = window.setTimeout(() => {
+      const target = initialFocusRef.current.current
+        ?? (dialog.current ? focusableElements(dialog.current)[0] : undefined)
+        ?? dialog.current;
+      target?.focus({ preventScroll: true });
+    }, 0);
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      const container = dialog.current;
+      if (!container) return;
+      if (event.key === "Escape") {
+        if (!blockedRef.current) {
+          event.preventDefault();
+          closeRef.current();
+        }
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const elements = focusableElements(container);
+      if (elements.length === 0) {
+        event.preventDefault();
+        container.focus({ preventScroll: true });
+        return;
+      }
+      const first = elements[0];
+      const last = elements[elements.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || !container.contains(active))) {
+        event.preventDefault();
+        last?.focus({ preventScroll: true });
+      } else if (!event.shiftKey && (active === last || !container.contains(active))) {
+        event.preventDefault();
+        first?.focus({ preventScroll: true });
+      }
+    };
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      window.clearTimeout(focusTimer);
+      document.removeEventListener("keydown", onKeyDown, true);
+      window.setTimeout(() => {
+        const fallback = document.querySelector<HTMLElement>("[data-dialog-fallback-focus]")
+          ?? document.querySelector<HTMLElement>('.nav-item[aria-current="page"]');
+        const target = previouslyFocused?.isConnected
+          && previouslyFocused.tabIndex >= 0
+          && previouslyFocused.getClientRects().length > 0
+          && !previouslyFocused.matches(":disabled")
+          ? previouslyFocused
+          : fallback;
+        target?.focus({ preventScroll: true });
+      }, 0);
+    };
+  }, []);
+
+  return dialog;
+}
+
 function productInitials(name: string): string {
   return name
     .split(/\s+/)
@@ -279,7 +361,7 @@ function LoginScreen({
         )}
         {guestAccess && <div className="login-divider"><span>Staff sign-in</span></div>}
         <form onSubmit={(event) => { event.preventDefault(); void submit(); }}>
-          <label className="field-label">Staff ID<input autoFocus autoComplete="username" value={staffId} onChange={(event) => setStaffId(event.target.value)} disabled={busy} /></label>
+          <label className="field-label">Staff ID<input autoFocus={!guestAccess} autoComplete="username" value={staffId} onChange={(event) => setStaffId(event.target.value)} disabled={busy} /></label>
           <label className="field-label">PIN<input type="password" inputMode="numeric" autoComplete="current-password" value={pin} onChange={(event) => setPin(event.target.value)} disabled={busy} /></label>
           {error && <div className="refund-error" role="alert"><Icon name="alert" />{error}</div>}
           <button className="login-submit" type="submit" disabled={busy}>{busy ? <span className="spinner" /> : <Icon name="lock" />}Sign in</button>
@@ -325,15 +407,7 @@ function fallbackReceipt(
 
 function ReceiptDialog({ receipt, onClose }: { receipt: ReceiptDto; onClose: () => void }) {
   const closeButton = useRef<HTMLButtonElement>(null);
-
-  useEffect(() => {
-    closeButton.current?.focus();
-    const onKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose]);
+  const dialog = useDialogFocus(onClose, false, closeButton);
 
   const paymentLabel = receipt.tender === "card"
     ? `${receipt.cardBrand ?? "Card"}${receipt.last4 ? ` •••• ${receipt.last4}` : ""}`
@@ -347,7 +421,7 @@ function ReceiptDialog({ receipt, onClose }: { receipt: ReceiptDto; onClose: () 
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
       if (event.target === event.currentTarget) onClose();
     }}>
-      <section className="receipt-modal" role="dialog" aria-modal="true" aria-labelledby="receipt-title">
+      <section ref={dialog} tabIndex={-1} className="receipt-modal" role="dialog" aria-modal="true" aria-labelledby="receipt-title">
         <div className="receipt-actions no-print">
           <button className="icon-button" type="button" onClick={() => window.print()} aria-label="Print receipt">
             <Icon name="print" />
@@ -630,6 +704,8 @@ function DiscountDialog({
   const [error, setError] = useState<string | null>(null);
   const amount = inputToMinor(value);
   const maximum = BigInt(line.subtotalMinor);
+  const closeButton = useRef<HTMLButtonElement>(null);
+  const dialog = useDialogFocus(onClose, busy, closeButton);
 
   const submit = () => {
     if (amount === null || amount < 0n || amount > maximum) {
@@ -643,8 +719,8 @@ function DiscountDialog({
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
       if (event.target === event.currentTarget && !busy) onClose();
     }}>
-      <section className="discount-modal" role="dialog" aria-modal="true" aria-labelledby="discount-title">
-        <div className="refund-modal-heading"><div><p className="eyebrow">Current cart</p><h2 id="discount-title">Discount {line.name}</h2></div><button className="icon-button" type="button" onClick={onClose} disabled={busy} aria-label="Close discount dialog"><Icon name="close" /></button></div>
+      <section ref={dialog} tabIndex={-1} className="discount-modal" role="dialog" aria-modal="true" aria-labelledby="discount-title">
+        <div className="refund-modal-heading"><div><p className="eyebrow">Current cart</p><h2 id="discount-title">Discount {line.name}</h2></div><button ref={closeButton} className="icon-button" type="button" onClick={onClose} disabled={busy} aria-label="Close discount dialog"><Icon name="close" /></button></div>
         <p>Line subtotal: <strong>{formatMoney(line.subtotalMinor, currency)}</strong>. Tax will be recalculated from the discounted amount.</p>
         <div className="refund-amount-shortcuts">
           {[0, 10, 20, 50].map((percent) => <button type="button" key={percent} disabled={busy} onClick={() => setValue(minorToInput((maximum * BigInt(percent) / 100n).toString()))}>{percent === 0 ? "Remove" : `${percent}% off`}</button>)}
@@ -662,7 +738,24 @@ type OrderFilter = typeof ORDER_FILTERS[number];
 
 function orderStatusLabel(status: string): string {
   if (status === "PAYMENT_PENDING") return "Payment pending";
+  if (status === "PARTIALLY_REFUNDED") return "Partially refunded";
+  if (status === "REFUND_PENDING") return "Refund pending";
   return status.charAt(0) + status.slice(1).toLocaleLowerCase();
+}
+
+function orderDisplayStatus(order: OrderDto): string {
+  if (order.refundStatus === "PENDING") return "REFUND_PENDING";
+  if (order.refundStatus === "PARTIAL") return "PARTIALLY_REFUNDED";
+  if (order.refundStatus === "FULL") return "REFUNDED";
+  return order.status;
+}
+
+function saleDetailDisplayStatus(detail: SaleDetailDto): string {
+  const refundedMinor = BigInt(detail.refundedMinor);
+  const remainingMinor = BigInt(detail.remainingMinor);
+  if (refundedMinor > 0n && remainingMinor > 0n) return "PARTIALLY_REFUNDED";
+  if (refundedMinor > 0n && remainingMinor === 0n) return "REFUNDED";
+  return detail.order.status;
 }
 
 function tenderLabel(payment?: PaymentAttemptDto): string {
@@ -670,6 +763,15 @@ function tenderLabel(payment?: PaymentAttemptDto): string {
   if (payment.tender === "cash") return "Cash";
   if (payment.tender === "vietnam_qr") return `Vietnam QR · ${walletLabel(payment.wallet)}`;
   return `${payment.cardBrand ?? "Card"}${payment.last4 ? ` •••• ${payment.last4}` : ""}`;
+}
+
+function recentSaleDescription(sale: RecentSale): string {
+  const status = orderDisplayStatus(sale.order);
+  const payment = sale.payment ? tenderLabel(sale.payment) : "Completed sale";
+  if (status === "PARTIALLY_REFUNDED") return `Partially refunded · ${payment}`;
+  if (status === "REFUNDED") return `Refunded · ${payment}`;
+  if (status === "REFUND_PENDING") return `Refund pending · ${payment}`;
+  return payment;
 }
 
 function minorToInput(amountMinor: AmountMinor): string {
@@ -703,15 +805,7 @@ function RefundDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
-
-  useEffect(() => {
-    closeButton.current?.focus();
-    const onKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape" && !busy) onClose();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [busy, onClose]);
+  const dialog = useDialogFocus(onClose, busy, closeButton);
 
   const submit = async () => {
     const amount = inputToMinor(amountValue);
@@ -755,7 +849,7 @@ function RefundDialog({
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
       if (event.target === event.currentTarget && !busy) onClose();
     }}>
-      <section className="refund-modal" role="dialog" aria-modal="true" aria-labelledby="refund-title">
+      <section ref={dialog} tabIndex={-1} className="refund-modal" role="dialog" aria-modal="true" aria-labelledby="refund-title">
         <div className="refund-modal-heading">
           <div><p className="eyebrow">Manager authorization</p><h2 id="refund-title">Refund order #{detail.order.number}</h2></div>
           <button ref={closeButton} className="icon-button" type="button" onClick={onClose} disabled={busy} aria-label="Close refund dialog"><Icon name="close" /></button>
@@ -792,11 +886,13 @@ function RefundDialog({
 function OrdersView({
   onShowReceipt,
   onNotice,
-  showDemoHint
+  showDemoHint,
+  refundsEnabled
 }: {
   onShowReceipt: (receipt: ReceiptDto) => void;
   onNotice: (message: string) => void;
   showDemoHint: boolean;
+  refundsEnabled: boolean;
 }) {
   const [orders, setOrders] = useState<OrderDto[]>([]);
   const [search, setSearch] = useState("");
@@ -851,7 +947,7 @@ function OrdersView({
 
   const payment = detail?.payments[0];
   const canRefund = Boolean(
-    detail && payment && payment.status === "CAPTURED" && BigInt(detail.remainingMinor) > 0n
+    refundsEnabled && detail && payment && payment.status === "CAPTURED" && BigInt(detail.remainingMinor) > 0n
   );
 
   const showReceipt = async () => {
@@ -873,7 +969,7 @@ function OrdersView({
     <main className="orders-page">
       <section className="orders-panel" aria-labelledby="orders-title">
         <div className="orders-heading">
-          <div><p className="eyebrow">Financial history</p><h1 id="orders-title">Orders</h1><p>Find a completed sale, inspect its payment, and issue a manager-authorized sandbox refund.</p></div>
+          <div><p className="eyebrow">Financial history</p><h1 id="orders-title">Orders</h1><p>{refundsEnabled ? "Find a completed sale, inspect its payment, and issue a manager-authorized sandbox refund." : "Find your guest-session sales, inspect payment details, and open sandbox receipts."}</p></div>
           <button className="refresh-orders" type="button" onClick={() => setRefreshKey((value) => value + 1)} disabled={loading}><Icon name="retry" />Refresh</button>
         </div>
         <div className="order-search"><Icon name="search" /><label className="sr-only" htmlFor="order-search">Search orders</label><input id="order-search" type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search order number, item, or SKU" /></div>
@@ -884,21 +980,24 @@ function OrdersView({
         <div className="orders-list" aria-busy={loading}>
           {loading ? <div className="orders-loading"><span className="spinner" /> Loading persistent order history…</div> : orders.length === 0 ? (
             <div className="orders-empty"><Icon name="receipt" /><h2>No matching orders</h2><p>Complete a sandbox sale or change the search and status filters.</p></div>
-          ) : orders.map((order) => (
-            <button key={order.id} type="button" className={`order-row ${selectedId === order.id ? "selected" : ""}`} onClick={() => setSelectedId(order.id)}>
-              <span className={`order-status-dot status-${order.status.toLocaleLowerCase()}`}><Icon name={order.status === "REFUNDED" ? "retry" : "check"} /></span>
-              <span className="order-row-copy"><strong>Order #{order.number}</strong><small>{formatReceiptDate(order.createdAt ?? "")} · {order.lines.reduce((sum, line) => sum + line.quantity, 0)} items</small><em>{order.lines.map((line) => line.name).join(", ")}</em></span>
-              <span className="order-row-total"><strong>{formatMoney(order.totalMinor, order.currency)}</strong><small className={`status-badge status-${order.status.toLocaleLowerCase()}`}>{orderStatusLabel(order.status)}</small></span>
-              <Icon name="chevron" />
-            </button>
-          ))}
+          ) : orders.map((order) => {
+            const displayStatus = orderDisplayStatus(order);
+            return (
+              <button key={order.id} type="button" className={`order-row ${selectedId === order.id ? "selected" : ""}`} onClick={() => setSelectedId(order.id)}>
+                <span className={`order-status-dot status-${displayStatus.toLocaleLowerCase()}`}><Icon name={displayStatus === "PAID" ? "check" : "retry"} /></span>
+                <span className="order-row-copy"><strong>Order #{order.number}</strong><small>{formatReceiptDate(order.createdAt ?? "")} · {itemCountLabel(order.lines.reduce((sum, line) => sum + line.quantity, 0))}</small><em>{order.lines.map((line) => line.name).join(", ")}</em></span>
+                <span className="order-row-total"><strong>{formatMoney(order.totalMinor, order.currency)}</strong><small className={`status-badge status-${displayStatus.toLocaleLowerCase()}`}>{orderStatusLabel(displayStatus)}</small></span>
+                <Icon name="chevron" />
+              </button>
+            );
+          })}
         </div>
       </section>
 
       <aside className="order-detail-panel" aria-live="polite" aria-busy={detailLoading}>
         {detailLoading ? <div className="detail-empty"><span className="spinner" /> Loading order details…</div> : !detail ? <div className="detail-empty"><Icon name="orders" /><h2>Select an order</h2><p>Payment and refund history will appear here.</p></div> : (
           <>
-            <div className="order-detail-heading"><div><p className="eyebrow">Order detail</p><h2>#{detail.order.number}</h2></div><span className={`status-badge status-${detail.order.status.toLocaleLowerCase()}`}>{orderStatusLabel(detail.order.status)}</span></div>
+            <div className="order-detail-heading"><div><p className="eyebrow">Order detail</p><h2>#{detail.order.number}</h2></div><span className={`status-badge status-${saleDetailDisplayStatus(detail).toLocaleLowerCase()}`}>{orderStatusLabel(saleDetailDisplayStatus(detail))}</span></div>
             <p className="order-detail-date">Created {formatReceiptDate(detail.order.createdAt ?? "")}</p>
             <div className="detail-section"><h3>Items</h3>{detail.order.lines.map((line) => <div className="detail-line" key={line.id}><span>{line.quantity} × {line.name}<small>{line.sku}</small></span><strong>{formatMoney(line.lineTotalMinor, detail.order.currency)}</strong></div>)}</div>
             <dl className="detail-totals"><div><dt>Subtotal</dt><dd>{formatMoney(detail.order.subtotalMinor, detail.order.currency)}</dd></div>{BigInt(detail.order.discountMinor) > 0n && <div className="discount-total"><dt>Discounts</dt><dd>−{formatMoney(detail.order.discountMinor, detail.order.currency)}</dd></div>}<div><dt>Tax</dt><dd>{formatMoney(detail.order.taxMinor, detail.order.currency)}</dd></div>{BigInt(detail.order.tipMinor) > 0n && <div><dt>Tip</dt><dd>{formatMoney(detail.order.tipMinor, detail.order.currency)}</dd></div>}<div className="detail-total"><dt>Original total</dt><dd>{formatMoney(detail.order.totalMinor, detail.order.currency)}</dd></div>{BigInt(detail.refundedMinor) > 0n && <div className="detail-refunded"><dt>Refunded</dt><dd>−{formatMoney(detail.refundedMinor, detail.order.currency)}</dd></div>}<div className="detail-net"><dt>Net paid</dt><dd>{formatMoney(detail.remainingMinor, detail.order.currency)}</dd></div></dl>
@@ -906,11 +1005,13 @@ function OrdersView({
             {payment?.vietnamQr && <div className="detail-section qr-history-section"><VietnamQrQuoteCard details={payment.vietnamQr} currency={detail.order.currency} /><PaymentTimeline details={payment.vietnamQr} /></div>}
             {detail.refunds.length > 0 && <div className="detail-section"><h3>Refund history</h3><div className="refund-history">{detail.refunds.map((refund) => <div key={refund.id}><span><strong>{formatMoney(refund.amountMinor, refund.currency)}</strong><small>{formatReceiptDate(refund.createdAt)}</small></span><span className={`status-badge status-${refund.status.toLocaleLowerCase()}`}>{orderStatusLabel(refund.status)}</span></div>)}</div></div>}
             <div className="order-detail-actions"><button type="button" onClick={() => void showReceipt()}><Icon name="receipt" />Receipt</button><button className="refund-action" type="button" disabled={!canRefund} onClick={() => setRefundOpen(true)}><Icon name="retry" />{BigInt(detail.refundedMinor) > 0n ? "Refund remaining" : "Refund"}</button></div>
-            {!canRefund && payment && <p className="refund-unavailable">This payment has no remaining refundable balance.</p>}
+            {!refundsEnabled && payment && BigInt(detail.remainingMinor) > 0n
+              ? <p className="refund-unavailable">Refunds require a manager and are disabled in isolated guest sessions.</p>
+              : !canRefund && payment && <p className="refund-unavailable">This payment has no remaining refundable balance.</p>}
           </>
         )}
       </aside>
-      {refundOpen && detail && payment && <RefundDialog detail={detail} payment={payment} showDemoHint={showDemoHint} onClose={() => setRefundOpen(false)} onRefunded={refunded} />}
+      {refundOpen && refundsEnabled && detail && payment && <RefundDialog detail={detail} payment={payment} showDemoHint={showDemoHint} onClose={() => setRefundOpen(false)} onRefunded={refunded} />}
     </main>
   );
 }
@@ -1175,6 +1276,11 @@ export function App() {
   const searchInput = useRef<HTMLInputElement>(null);
   const qrPollInFlight = useRef(false);
 
+  const focusProductSearch = () => {
+    if (!window.matchMedia("(min-width: 761px)").matches) return;
+    searchInput.current?.focus({ preventScroll: true });
+  };
+
   const initialize = async () => {
     setLoading(true);
     setPageError(null);
@@ -1192,7 +1298,7 @@ export function App() {
         persistedOrders
           .filter((order) => order.status === "PAID" || order.status === "REFUNDED")
           .slice(0, 4)
-          .map((order) => ({ order }))
+          .map((order) => ({ order, ...(order.payment ? { payment: order.payment } : {}) }))
       );
     } catch (error) {
       setPageError(errorMessage(error));
@@ -1208,6 +1314,12 @@ export function App() {
     initialized.current = true;
     void initialize();
   }, [runtimeStatus?.auth.enabled, session?.token]);
+
+  useEffect(() => {
+    if (activeView !== "checkout") return;
+    const frame = window.requestAnimationFrame(focusProductSearch);
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeView, runtimeStatus?.auth.enabled, session?.token]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 30_000);
@@ -1294,7 +1406,7 @@ export function App() {
       setPageError(errorMessage(error));
     } finally {
       setCartBusy(false);
-      searchInput.current?.focus();
+      focusProductSearch();
     }
   };
 
@@ -1583,7 +1695,7 @@ export function App() {
       setReceipt(null);
       setSearch("");
       setCategory("All");
-      window.setTimeout(() => searchInput.current?.focus(), 0);
+      window.setTimeout(focusProductSearch, 0);
     } catch (error) {
       setPageError(errorMessage(error));
     } finally {
@@ -1718,7 +1830,6 @@ export function App() {
               onKeyDown={handleSearchKeyDown}
               placeholder="Search products, SKU, or barcode"
               autoComplete="off"
-              autoFocus
             />
             <span className="search-hint"><Icon name="barcode" /> Scan ready</span>
           </div>
@@ -1784,18 +1895,18 @@ export function App() {
               <span>{recentSales.length} completed</span>
             </div>
             {recentSales.length === 0 ? (
-              <div className="activity-empty"><span className="activity-icon"><Icon name="receipt" /></span><div><strong>Completed sales appear here</strong><p>Receipts and the refund workflow will be available from this register session.</p></div></div>
+              <div className="activity-empty"><span className="activity-icon"><Icon name="receipt" /></span><div><strong>Completed sales appear here</strong><p>{session?.staff.guest ? "Receipts remain available within this isolated guest session." : "Receipts and the refund workflow will be available from this register session."}</p></div></div>
             ) : (
               <ul className="sale-list">
                 {recentSales.map((sale) => (
                   <li key={sale.order.id}>
                     <button className="sale-summary" type="button" onClick={() => void showRecentReceipt(sale)}>
-                      <span className="activity-icon success"><Icon name={sale.order.status === "REFUNDED" ? "retry" : "check"} /></span>
-                      <span><strong>Order #{sale.order.number}</strong><small>{formatDate(sale.payment?.createdAt ?? sale.order.createdAt)} · {sale.order.status === "REFUNDED" ? "Refunded" : sale.payment?.tender === "card" ? sale.payment.cardBrand ?? "Card" : sale.payment?.tender === "vietnam_qr" ? walletLabel(sale.payment.wallet) : sale.payment?.tender === "cash" ? "Cash" : "Completed sale"}</small></span>
+                      <span className="activity-icon success"><Icon name={orderDisplayStatus(sale.order) === "PAID" ? "check" : "retry"} /></span>
+                      <span><strong>Order #{sale.order.number}</strong><small>{formatDate(sale.payment?.createdAt ?? sale.order.createdAt)} · {recentSaleDescription(sale)}</small></span>
                       <b>{formatMoney(sale.order.totalMinor, sale.order.currency)}</b>
                       <Icon name="chevron" />
                     </button>
-                    <button className="refund-placeholder" type="button" onClick={() => setActiveView("orders")}>Refund</button>
+                    <button className="refund-placeholder" type="button" onClick={() => setActiveView("orders")}>{session?.staff.guest ? "View order" : "Refund"}</button>
                   </li>
                 ))}
               </ul>
@@ -1806,7 +1917,7 @@ export function App() {
         <aside className="cart-panel" aria-labelledby="cart-title" aria-busy={cartBusy || paymentBusy}>
           <div className="cart-header">
             <div><p className="eyebrow">{settings?.registerName ?? "Register 01"}</p><h2 id="cart-title">Current cart</h2></div>
-            <span className="cart-count">{cart?.lines.reduce((sum, line) => sum + line.quantity, 0) ?? 0} items</span>
+            <span className="cart-count">{itemCountLabel(cart?.lines.reduce((sum, line) => sum + line.quantity, 0) ?? 0)}</span>
           </div>
 
           <div className="cart-body">
@@ -1904,7 +2015,7 @@ export function App() {
             )}
 
             {paymentState.phase === "captured" && (
-              <button className="wide-action new-sale" type="button" onClick={() => void newSale()} disabled={cartBusy}><Icon name="plus" /> Start new sale</button>
+              <button data-dialog-fallback-focus className="wide-action new-sale" type="button" onClick={() => void newSale()} disabled={cartBusy}><Icon name="plus" /> Start new sale</button>
             )}
 
             <div className="payment-footnote">
@@ -1913,7 +2024,7 @@ export function App() {
             </div>
           </div>
         </aside>
-      </main> : activeView === "orders" ? <OrdersView onShowReceipt={setReceipt} onNotice={setNotice} showDemoHint={runtimeStatus?.auth.publicSandbox === false} /> : settings && managerAccess ? <ManagementView settings={settings} onSettingsChanged={setSettings} onCatalogChanged={setProducts} onNotice={setNotice} onSandboxReset={afterSandboxReset} /> : <main className="management-page"><div className="orders-loading"><span className="spinner" />Loading manager workspace</div></main>}
+      </main> : activeView === "orders" ? <OrdersView onShowReceipt={setReceipt} onNotice={setNotice} showDemoHint={runtimeStatus?.auth.publicSandbox === false} refundsEnabled={!session?.staff.guest} /> : settings && managerAccess ? <ManagementView settings={settings} onSettingsChanged={setSettings} onCatalogChanged={setProducts} onNotice={setNotice} onSandboxReset={afterSandboxReset} /> : <main className="management-page"><div className="orders-loading"><span className="spinner" />Loading manager workspace</div></main>}
 
       {notice && <div className="toast" role="status"><Icon name="alert" /><span>{notice}</span><button type="button" onClick={() => setNotice(null)} aria-label="Dismiss notification"><Icon name="close" /></button></div>}
       {receipt && <ReceiptDialog receipt={receipt} onClose={() => setReceipt(null)} />}

@@ -24,6 +24,7 @@ import {
   cartDto,
   merchantSettingsDto,
   orderDto,
+  orderSummaryDto,
   paymentAttemptDto,
   paymentDto,
   productDto,
@@ -521,8 +522,19 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       query.offset,
       staff?.scopeId
     );
+    const summaries = await Promise.all(orders.map(async (order) => {
+      const payments = await service.listPaymentsForOrder(order.id);
+      const payment = payments[0];
+      const [refunds, attempt] = payment
+        ? await Promise.all([
+            service.listRefundsForPayment(payment.id),
+            service.getPaymentAttempt(payment.paymentAttemptId, false)
+          ])
+        : [[], undefined] as const;
+      return orderSummaryDto(order, payment, refunds, attempt?.attempt);
+    }));
     return {
-      orders: orders.map(orderDto),
+      orders: summaries,
       page: { limit: query.limit, offset: query.offset, returned: orders.length }
     };
   });

@@ -1350,7 +1350,7 @@ export class PosService {
       const appended = attempt.appendVietnamQrTimelineEvent({
         id: `refund:${refund.id}`,
         type: "REFUNDED",
-        description: `Refunded ${refund.amount.minorUnits.toString()} ${refund.amount.currency} minor units`,
+        description: `Refunded ${formatTimelineMoney(refund.amount)}`,
         occurredAt: refund.updatedAt,
       });
       if (!appended) return;
@@ -1449,6 +1449,13 @@ export class PosService {
       expiresAt: new Date(timestamp.getTime() + 24 * 60 * 60 * 1000)
     });
   }
+}
+
+function formatTimelineMoney(value: Money): string {
+  const absoluteMinor = value.minorUnits < 0n ? -value.minorUnits : value.minorUnits;
+  const amount = `${absoluteMinor / 100n}.${(absoluteMinor % 100n).toString().padStart(2, "0")}`;
+  const sign = value.minorUnits < 0n ? "−" : "";
+  return value.currency === "USD" ? `${sign}$${amount}` : `${sign}${value.currency} ${amount}`;
 }
 
 function isSandboxResettable(

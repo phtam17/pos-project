@@ -276,6 +276,23 @@ export function receiptDto(
   };
 }
 
+export function orderSummaryDto(
+  order: Order,
+  payment?: Payment,
+  refunds: readonly Refund[] = [],
+  attempt?: PaymentAttempt
+): Record<string, unknown> {
+  const receipt = receiptDto(order, payment, refunds, attempt);
+  return {
+    ...orderDto(order),
+    payment: receipt.payment,
+    paymentStatus: receipt.paymentStatus,
+    refundStatus: receipt.refundStatus,
+    refundedMinor: receipt.refundedMinor,
+    remainingMinor: receipt.remainingMinor
+  };
+}
+
 export function merchantSettingsDto(settings: MerchantSettings): Record<string, unknown> {
   return {
     id: settings.id,
