@@ -1,0 +1,45 @@
+name: Bug report
+description: Report a reproducible problem using synthetic sandbox data.
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include real card data, bank credentials, personal information, or secrets. Report security vulnerabilities privately as described in SECURITY.md.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Sandbox reproduction
+      description: Provide minimal steps using only the included simulator and synthetic data.
+    validations:
+      required: true
+  - type: dropdown
+    id: persistence
+    attributes:
+      label: Persistence mode
+      options:
+        - Memory
+        - PostgreSQL
+        - Public hosted sandbox
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Commit or version
+      placeholder: d1a12dc or main
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Browser, operating system, Node.js version, and any non-secret configuration relevant to the issue.

@@ -1,5 +1,8 @@
 # Open POS skeleton
 
+[![CI](https://github.com/phtam17/pos-project/actions/workflows/ci.yml/badge.svg)](https://github.com/phtam17/pos-project/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 A processor-neutral point-of-sale starter for a single merchant. It deliberately keeps payment-card data outside the application: the register sends an amount and merchant reference to a payment-provider adapter and stores only the provider result and receipt-safe metadata.
 
 The included card and Vietnam QR providers are simulators. They are suitable for development only and must be replaced by contracted, certified provider integrations before accepting live payments.
@@ -136,8 +139,10 @@ into a live-looking payment mode. For a demo exposed beyond your own computer, s
 
 - newly generated `AUTH_SECRET` and `SIMULATED_WEBHOOK_SECRET` values of at least
   32 characters (the example and development placeholders are rejected);
-- non-default cashier and manager PINs of at least six digits;
-- explicit HTTPS `CORS_ORIGINS` rather than a wildcard;
+- guest-only access by default; if `PUBLIC_STAFF_LOGIN_ENABLED=true`, distinct
+  non-default cashier and manager PINs of at least six digits;
+- explicit HTTPS `CORS_ORIGINS`, or a same-origin production build served from
+  `STATIC_DIR` with cross-origin access disabled;
 - `RATE_LIMIT_ENABLED=true`;
 - authentication and automatic demo reset enabled, with a positive
   `DEMO_RESET_INTERVAL_MINUTES`.
@@ -146,11 +151,28 @@ Public mode adds a one-click **Enter sandbox demo** option. Each visitor receive
 signed guest session whose carts, orders, payment attempts, payments, and receipts
 are isolated from every other visitor. Guest access is cashier-only: it cannot open
 merchant management, reconciliation, audit history, or manager-authorized refunds.
-The regular staff sign-in remains available for the site owner.
+The public deployment disables the staff login API and form unless the owner
+explicitly opts in with `PUBLIC_STAFF_LOGIN_ENABLED=true` and hardened PINs.
 
 The built-in limiter is process-local and suitable only for this single-process
 sandbox. Use a shared store, trusted identity provider, TLS, and a real secret
 manager before treating any deployment as production infrastructure.
+
+## Deploy the public sandbox
+
+`Dockerfile` builds one production container that serves the register and API
+from the same origin. `render.yaml` defines a cost-bounded Render Blueprint with
+one free web instance, managed PostgreSQL, generated secrets, migrations,
+sample catalog seeding, CI-gated deploys, health checks, and hourly resets.
+
+The Blueprint is configuration only: it does not create resources or charges
+until you review and apply it from your own Render account. Render's free
+PostgreSQL database expires after 30 days and has no backups, so this path is a
+disposable public demonstration rather than durable hosting.
+
+See [the public deployment guide](docs/public-deployment.md) for deployment,
+monitoring, spending safeguards, and the GitHub security settings to enable
+after the repository becomes public.
 
 ## Run with PostgreSQL
 
@@ -200,3 +222,10 @@ docs                          Architecture, security, and provider checklists
 6. Complete production UAT with physical test cards and reconcile test settlements.
 
 See [the provider acceptance checklist](docs/provider-acceptance-checklist.md) and [security boundaries](docs/security.md).
+
+## License, security, and privacy
+
+Open POS is available under the [Apache License 2.0](LICENSE). Report security
+issues through the private process in [SECURITY.md](SECURITY.md), and review the
+[public sandbox privacy note](PRIVACY.md) before hosting the demo. Contributions
+should follow [CONTRIBUTING.md](CONTRIBUTING.md).

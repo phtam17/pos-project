@@ -52,7 +52,8 @@ Only provider references and receipt-safe metadata explicitly documented by the 
 - Manager-visible audit history, manual transaction reset, optional automatic
   demo reset, and startup rejection of live mode.
 - Strict startup checks when `PUBLIC_SANDBOX=true`, including non-default secrets,
-  stronger PINs, explicit CORS origins, and automatic reset.
+  guest-only staff-login defaults, same-origin or explicit HTTPS CORS controls,
+  security response headers, startup cleanup, and automatic reset.
 
 These are demonstrator controls. Local PIN credentials, stateless HMAC tokens, and
 an in-process limiter are not substitutes for trusted production identity, token
