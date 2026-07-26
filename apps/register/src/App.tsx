@@ -351,9 +351,9 @@ function LoginScreen({
   return (
     <main className="login-page">
       <section className="login-card" aria-labelledby="login-title">
-        <div className="login-brand"><div className="brand-mark" aria-hidden="true"><span /><span /><span /><span /></div><div><strong>Open POS</strong><span>{guestAccess && !staffLoginEnabled ? "Public demo" : "Staff access"}</span></div></div>
+        <div className="login-brand"><div className="brand-mark" aria-hidden="true"><span /><span /><span /><span /></div><div><strong>VariPOS</strong><span>{guestAccess && !staffLoginEnabled ? "Public demo" : "Staff access"}</span></div></div>
         <div className="sandbox-login-badge"><Icon name="lock" /> Sandbox simulation only · no real money</div>
-        <div className="login-heading"><p className="eyebrow">{guestAccess ? "Public sandbox" : "Register sign in"}</p><h1 id="login-title">{guestAccess ? "Try Open POS" : "Welcome back"}</h1><p>{guestAccess ? "Start an isolated guest session. Your sandbox sales are separated from other visitors and expire automatically." : "Sign in as a cashier to run sales or as a manager to configure the demo."}</p></div>
+        <div className="login-heading"><p className="eyebrow">{guestAccess ? "Public sandbox" : "Register sign in"}</p><h1 id="login-title">{guestAccess ? "Try VariPOS" : "Welcome back"}</h1><p>{guestAccess ? "Start an isolated guest session. Your sandbox sales are separated from other visitors and expire automatically." : "Sign in as a cashier to run sales or as a manager to configure the demo."}</p></div>
         {guestAccess && (
           <div className="guest-demo-entry">
             <button className="login-submit" type="button" onClick={() => void enterGuestDemo()} disabled={busy}>{busy ? <span className="spinner" /> : <Icon name="card" />}Enter sandbox demo</button>
@@ -437,7 +437,7 @@ function ReceiptDialog({ receipt, onClose }: { receipt: ReceiptDto; onClose: () 
 
         <div className="receipt-paper">
           <div className="receipt-brand-mark" aria-hidden="true"><span /><span /><span /><span /></div>
-          <p className="receipt-eyebrow">{receipt.merchant?.merchantName ?? "Open POS"}</p>
+          <p className="receipt-eyebrow">{receipt.merchant?.merchantName ?? "VariPOS"}</p>
           {receipt.merchant?.receiptHeader && <p className="receipt-custom-header">{receipt.merchant.receiptHeader}</p>}
           <h2 id="receipt-title">{receipt.refundStatus === "FULL" ? "Order refunded" : "Payment received"}</h2>
           <p className="receipt-subtitle">Order #{receipt.orderNumber} · {formatReceiptDate(receipt.createdAt)}</p>
@@ -1337,8 +1337,8 @@ export function App() {
       initialized.current = false;
       setPageError("Your staff session expired. Sign in again.");
     };
-    window.addEventListener("open-pos:unauthorized", signedOut);
-    return () => window.removeEventListener("open-pos:unauthorized", signedOut);
+    window.addEventListener("varipos:unauthorized", signedOut);
+    return () => window.removeEventListener("varipos:unauthorized", signedOut);
   }, []);
 
   useEffect(() => {
@@ -1789,7 +1789,7 @@ export function App() {
       <header className="topbar">
         <div className="brand">
           <div className="brand-mark" aria-hidden="true"><span /><span /><span /><span /></div>
-          <div><strong>{settings?.merchantName ?? "Open POS"}</strong><span>{settings?.locationName ?? "Downtown"} · {settings?.registerName ?? "Register 01"}</span></div>
+          <div><strong>{settings?.merchantName ?? "VariPOS"}</strong><span>{settings?.locationName ?? "Downtown"} · {settings?.registerName ?? "Register 01"}</span></div>
         </div>
 
         <nav className="main-nav" aria-label="Register sections">

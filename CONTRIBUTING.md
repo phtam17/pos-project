@@ -1,6 +1,6 @@
 # Contributing
 
-Open POS welcomes focused improvements to the sandbox architecture, register
+VariPOS welcomes focused improvements to the sandbox architecture, register
 experience, tests, and documentation.
 
 Before opening an issue or pull request:

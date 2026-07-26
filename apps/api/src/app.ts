@@ -211,7 +211,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   }
 
   app.addHook("onRequest", async (_request, reply) => {
-    reply.header("X-Open-POS-Mode", "sandbox");
+    reply.header("X-VariPOS-Mode", "sandbox");
     reply.header("Cache-Control", "no-store");
     reply.header("X-Content-Type-Options", "nosniff");
     reply.header("X-Frame-Options", "DENY");

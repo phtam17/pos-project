@@ -49,12 +49,12 @@ try {
     method: "PUT",
     url: "/v1/merchant-settings",
     payload: {
-      merchantName: "Open POS PostgreSQL Demo",
+      merchantName: "VariPOS PostgreSQL Demo",
       locationName: "Downtown",
       registerName: "Register 01",
       currency: "USD",
       receiptHeader: "Durable sandbox demonstration",
-      receiptFooter: "Thank you for testing Open POS.",
+      receiptFooter: "Thank you for testing VariPOS.",
       showSkuOnReceipt: true,
       discountsEnabled: true,
       tipsEnabled: true
@@ -140,7 +140,7 @@ try {
   assert.equal(receiptResponse.json<{ tipMinor: string }>().tipMinor, "15");
   assert.equal(
     receiptResponse.json<{ merchant: { merchantName: string } }>().merchant.merchantName,
-    "Open POS PostgreSQL Demo"
+    "VariPOS PostgreSQL Demo"
   );
 
   // A second cart with the same product protects against globally-colliding

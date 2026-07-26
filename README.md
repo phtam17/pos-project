@@ -1,4 +1,4 @@
-# Open POS skeleton
+# VariPOS
 
 [![CI](https://github.com/phtam17/pos-project/actions/workflows/ci.yml/badge.svg)](https://github.com/phtam17/pos-project/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
@@ -225,7 +225,7 @@ See [the provider acceptance checklist](docs/provider-acceptance-checklist.md) a
 
 ## License, security, and privacy
 
-Open POS is available under the [Apache License 2.0](LICENSE). Report security
+VariPOS is available under the [Apache License 2.0](LICENSE). Report security
 issues through the private process in [SECURITY.md](SECURITY.md), and review the
 [public sandbox privacy note](PRIVACY.md) before hosting the demo. Contributions
 should follow [CONTRIBUTING.md](CONTRIBUTING.md).

@@ -79,7 +79,7 @@ describe("cart and order totals", () => {
       version: 2,
       tipsEnabled: false
     });
-    expect(settings.merchantName).toBe("Open POS");
+    expect(settings.merchantName).toBe("VariPOS");
   });
 
   it("validates order payment lifecycle and exact captured total", () => {

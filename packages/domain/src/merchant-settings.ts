@@ -92,7 +92,7 @@ export class MerchantSettings implements MerchantSettingsSnapshot {
 
   static defaults(at: Date = new Date()): MerchantSettings {
     return new MerchantSettings({
-      merchantName: "Open POS",
+      merchantName: "VariPOS",
       locationName: "Downtown",
       registerName: "Register 01",
       currency: "USD",

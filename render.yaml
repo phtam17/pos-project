@@ -3,7 +3,7 @@ previews:
 
 services:
   - type: web
-    name: open-pos-sandbox
+    name: varipos-sandbox
     runtime: docker
     plan: free
     region: oregon
@@ -36,7 +36,7 @@ services:
         value: postgres
       - key: DATABASE_URL
         fromDatabase:
-          name: open-pos-postgres
+          name: varipos-postgres
           property: connectionString
       - key: AUTH_SECRET
         generateValue: true
@@ -58,10 +58,10 @@ services:
         value: "60"
 
 databases:
-  - name: open-pos-postgres
+  - name: varipos-postgres
     plan: free
     region: oregon
     postgresMajorVersion: "17"
-    databaseName: open_pos
-    user: open_pos
+    databaseName: varipos
+    user: varipos
     ipAllowList: []

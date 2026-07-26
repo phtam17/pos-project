@@ -50,11 +50,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: docker build --tag open-pos:ci .
+      - run: docker build --tag varipos:ci .
       - name: Smoke test production container
         run: |
           set -eu
-          container_id=$(docker run --detach --publish 3001:3000 --env PERSISTENCE_MODE=memory open-pos:ci)
+          container_id=$(docker run --detach --publish 3001:3000 --env PERSISTENCE_MODE=memory varipos:ci)
           trap 'docker rm --force "$container_id"' EXIT
           for attempt in $(seq 1 30); do
             if curl --fail --silent http://127.0.0.1:3001/health >/dev/null; then
@@ -67,4 +67,4 @@ jobs:
             sleep 1
           done
           curl --fail --silent http://127.0.0.1:3001/ready >/dev/null
-          curl --fail --silent http://127.0.0.1:3001/ | grep --quiet "Open POS"
+          curl --fail --silent http://127.0.0.1:3001/ | grep --quiet "VariPOS"

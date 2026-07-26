@@ -1,6 +1,7 @@
 import { Money } from "@pos/domain";
 
-const typeKey = "__openPosType";
+const typeKey = "__variPosType";
+const legacyTypeKey = "__openPosType";
 
 type Rehydrator<T> = { rehydrate(snapshot: never): T };
 
@@ -40,13 +41,14 @@ function decodeValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(decodeValue);
   if (value === null || typeof value !== "object") return value;
   const record = value as Record<string, unknown>;
-  if (record[typeKey] === "Money") {
+  const encodedType = record[typeKey] ?? record[legacyTypeKey];
+  if (encodedType === "Money") {
     if (typeof record.minorUnits !== "string" || typeof record.currency !== "string") {
       throw new TypeError("Invalid Money value in persisted snapshot");
     }
     return Money.fromMinor(BigInt(record.minorUnits), record.currency);
   }
-  if (record[typeKey] === "Date") {
+  if (encodedType === "Date") {
     if (typeof record.value !== "string") {
       throw new TypeError("Invalid Date value in persisted snapshot");
     }
@@ -54,7 +56,7 @@ function decodeValue(value: unknown): unknown {
     if (Number.isNaN(date.getTime())) throw new TypeError("Invalid persisted Date");
     return date;
   }
-  if (record[typeKey] === "BigInt") {
+  if (encodedType === "BigInt") {
     if (typeof record.value !== "string") {
       throw new TypeError("Invalid bigint value in persisted snapshot");
     }

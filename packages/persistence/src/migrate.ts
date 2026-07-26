@@ -35,7 +35,7 @@ export async function runMigrations({
   await client.connect();
 
   try {
-    await client.query("SELECT pg_advisory_lock(hashtext($1))", ["open-pos:migrations"]);
+    await client.query("SELECT pg_advisory_lock(hashtext($1))", ["varipos:migrations"]);
     await client.query(`
       CREATE TABLE IF NOT EXISTS _pos_migrations (
         name text PRIMARY KEY,
@@ -86,7 +86,7 @@ export async function runMigrations({
   } finally {
     try {
       await client.query("SELECT pg_advisory_unlock(hashtext($1))", [
-        "open-pos:migrations"
+        "varipos:migrations"
       ]);
     } finally {
       await client.end();

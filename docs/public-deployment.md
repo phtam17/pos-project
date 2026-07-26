@@ -1,7 +1,7 @@
 # Public sandbox deployment
 
 This guide publishes the simulator as an anonymous demonstration. It does not
-turn Open POS into a real payment system.
+turn VariPOS into a real payment system.
 
 ## Deployment shape
 

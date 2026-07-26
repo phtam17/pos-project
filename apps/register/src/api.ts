@@ -243,33 +243,43 @@ export interface ReceiptDto {
 }
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") ?? "";
-const SESSION_STORAGE_KEY = "open-pos.staff-session";
+const SESSION_STORAGE_KEY = "varipos.staff-session";
+const LEGACY_SESSION_STORAGE_KEY = "open-pos.staff-session";
 
 export function getStoredSession(): AuthSessionDto | null {
   if (typeof window === "undefined") return null;
-  const saved = window.sessionStorage.getItem(SESSION_STORAGE_KEY);
+  const saved = window.sessionStorage.getItem(SESSION_STORAGE_KEY)
+    ?? window.sessionStorage.getItem(LEGACY_SESSION_STORAGE_KEY);
   if (!saved) return null;
   try {
     const session = normalizeSession(JSON.parse(saved) as unknown);
     const expiresAt = session ? new Date(session.expiresAt).getTime() : Number.NaN;
     if (!session || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
       window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
+      window.sessionStorage.removeItem(LEGACY_SESSION_STORAGE_KEY);
       return null;
     }
+    window.sessionStorage.setItem(SESSION_STORAGE_KEY, saved);
+    window.sessionStorage.removeItem(LEGACY_SESSION_STORAGE_KEY);
     return session;
   } catch {
     window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
+    window.sessionStorage.removeItem(LEGACY_SESSION_STORAGE_KEY);
     return null;
   }
 }
 
 export function clearStoredSession(): void {
-  if (typeof window !== "undefined") window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
+  if (typeof window !== "undefined") {
+    window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
+    window.sessionStorage.removeItem(LEGACY_SESSION_STORAGE_KEY);
+  }
 }
 
 function storeSession(session: AuthSessionDto): void {
   if (typeof window !== "undefined") {
     window.sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
+    window.sessionStorage.removeItem(LEGACY_SESSION_STORAGE_KEY);
   }
 }
 
@@ -722,7 +732,7 @@ function normalizeMerchantSettings(value: unknown): MerchantSettingsDto | undefi
   if (!optionalText(source.merchantName)) return undefined;
   return {
     id: text(source.id, "default"),
-    merchantName: text(source.merchantName, "Open POS"),
+    merchantName: text(source.merchantName, "VariPOS"),
     locationName: text(source.locationName, "Downtown"),
     registerName: text(source.registerName, "Register 01"),
     currency: text(source.currency, "USD").toUpperCase(),
@@ -768,7 +778,7 @@ async function request(path: string, init: RequestInit = {}): Promise<unknown> {
     const code = optionalText(error.code ?? nestedError.code);
     if (response.status === 401 && code === "UNAUTHORIZED" && (session || hadStoredSession)) {
       clearStoredSession();
-      window.dispatchEvent(new Event("open-pos:unauthorized"));
+      window.dispatchEvent(new Event("varipos:unauthorized"));
     }
     throw new ApiError(message, response.status, code);
   }

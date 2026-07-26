@@ -125,7 +125,7 @@ export class SimulatedVietnamQrProvider implements PaymentProvider {
     const now = this.now();
     const expiresAt = new Date(now.getTime() + this.expiresInMs);
     const providerReference = `vnqr_order_${stableHash(input.attemptId)}`;
-    const payload = new URL("https://sandbox.openpos.local/vietnam-qr");
+    const payload = new URL("https://sandbox.varipos.local/vietnam-qr");
     payload.searchParams.set("attempt", input.attemptId);
     payload.searchParams.set("amount", input.amount.minorUnits.toString());
     payload.searchParams.set("currency", input.amount.currency);
@@ -434,7 +434,7 @@ export class SimulatedVietnamQrProvider implements PaymentProvider {
   }
 
   private refreshProcessingResult(stored: StoredQrSale, processedAt: Date): void {
-    const payload = new URL("https://sandbox.openpos.local/vietnam-qr");
+    const payload = new URL("https://sandbox.varipos.local/vietnam-qr");
     payload.searchParams.set("attempt", stored.input.attemptId);
     payload.searchParams.set("amount", stored.input.amount.minorUnits.toString());
     payload.searchParams.set("currency", stored.input.amount.currency);

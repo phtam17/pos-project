@@ -1,6 +1,6 @@
 # Security policy
 
-Open POS is a sandbox engineering project. It does not process real card or QR
+VariPOS is a sandbox engineering project. It does not process real card or QR
 payments and is not PCI-certified. Please never submit real cardholder data,
 bank credentials, production secrets, personal information, or live payment
 provider payloads to this repository or its demo.

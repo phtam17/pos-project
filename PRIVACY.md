@@ -1,6 +1,6 @@
 # Public sandbox privacy note
 
-The hosted Open POS sandbox is designed to work without an account and without
+The hosted VariPOS sandbox is designed to work without an account and without
 personal information. Do not enter real card numbers, bank credentials,
 customer names, addresses, phone numbers, email addresses, or production data.
 

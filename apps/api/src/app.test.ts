@@ -45,9 +45,9 @@ async function app(paymentProvider?: SimulatedPaymentProvider) {
 
 describe("POS API vertical slice", () => {
   it("serves the production register from the API origin with security headers", async () => {
-    const staticDir = await mkdtemp(join(tmpdir(), "open-pos-static-"));
+    const staticDir = await mkdtemp(join(tmpdir(), "varipos-static-"));
     temporaryDirectories.push(staticDir);
-    await writeFile(join(staticDir, "index.html"), "<!doctype html><title>Open POS test</title>");
+    await writeFile(join(staticDir, "index.html"), "<!doctype html><title>VariPOS test</title>");
     await mkdir(join(staticDir, "assets"));
     await writeFile(join(staticDir, "assets", "app.js"), "console.log('sandbox')");
     const instance = await buildApp({
@@ -68,7 +68,7 @@ describe("POS API vertical slice", () => {
       headers: { accept: "text/html" }
     });
     expect(index.statusCode).toBe(200);
-    expect(index.body).toContain("Open POS test");
+    expect(index.body).toContain("VariPOS test");
     expect(index.headers["content-security-policy"]).toContain("default-src 'self'");
     expect(index.headers["strict-transport-security"]).toContain("max-age=31536000");
     expect(index.headers["x-content-type-options"]).toBe("nosniff");
