@@ -23,6 +23,7 @@ const SENSITIVE_KEY_NAMES = new Set([
 ]);
 
 const PAN_CANDIDATE = /(?<!\d)\d{12,19}(?!\d)/g;
+const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /**
  * Runtime guard for callers that evade the TypeScript contract. It rejects
@@ -35,6 +36,12 @@ export function assertNoSensitiveCardData(value: unknown): void {
 
 function inspect(value: unknown, seen: WeakSet<object>): void {
   if (typeof value === "string") {
+    // A UUID can legitimately end in 12 numeric characters and randomly pass
+    // Luhn. Only exempt the complete standards-shaped identifier; PAN-like
+    // digit sequences in every other string remain rejected.
+    if (CANONICAL_UUID.test(value)) {
+      return;
+    }
     for (const candidate of value.matchAll(PAN_CANDIDATE)) {
       const digits = candidate[0];
       if (passesLuhn(digits)) {

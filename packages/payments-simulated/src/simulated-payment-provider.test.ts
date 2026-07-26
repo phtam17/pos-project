@@ -106,6 +106,18 @@ describe("simulator safety and replay behavior", () => {
       SensitiveCardDataError,
     );
   });
+
+  it("accepts canonical UUID identifiers with a Luhn-valid numeric suffix", async () => {
+    const provider = new SimulatedPaymentProvider();
+    const uuidWithLuhnValidSuffix = "123e4567-e89b-42d3-a456-000000000000";
+
+    await expect(provider.startSale({
+      ...sale(2_500n, "uuid"),
+      attemptId: uuidWithLuhnValidSuffix,
+      orderId: uuidWithLuhnValidSuffix,
+      metadata: { orderId: uuidWithLuhnValidSuffix },
+    })).resolves.toMatchObject({ status: "CAPTURED" });
+  });
 });
 
 describe("refunds, settlements, and webhooks", () => {
