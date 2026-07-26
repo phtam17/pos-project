@@ -1,0 +1,12 @@
+.git
+.github
+.agents
+.codex
+.env*
+node_modules
+**/dist
+coverage
+postgres-data
+*.log
+.DS_Store
+docs

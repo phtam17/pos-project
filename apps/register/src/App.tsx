@@ -318,6 +318,7 @@ function LoginScreen({
   const [error, setError] = useState<string | null>(null);
   const showLocalCredentials = runtimeStatus !== null && !runtimeStatus.auth.publicSandbox;
   const guestAccess = runtimeStatus?.auth.guestAccess === true;
+  const staffLoginEnabled = runtimeStatus?.auth.staffLoginEnabled !== false;
 
   const submit = async () => {
     if (!staffId.trim() || !pin) {
@@ -350,7 +351,7 @@ function LoginScreen({
   return (
     <main className="login-page">
       <section className="login-card" aria-labelledby="login-title">
-        <div className="login-brand"><div className="brand-mark" aria-hidden="true"><span /><span /><span /><span /></div><div><strong>Open POS</strong><span>Staff access</span></div></div>
+        <div className="login-brand"><div className="brand-mark" aria-hidden="true"><span /><span /><span /><span /></div><div><strong>Open POS</strong><span>{guestAccess && !staffLoginEnabled ? "Public demo" : "Staff access"}</span></div></div>
         <div className="sandbox-login-badge"><Icon name="lock" /> Sandbox simulation only · no real money</div>
         <div className="login-heading"><p className="eyebrow">{guestAccess ? "Public sandbox" : "Register sign in"}</p><h1 id="login-title">{guestAccess ? "Try Open POS" : "Welcome back"}</h1><p>{guestAccess ? "Start an isolated guest session. Your sandbox sales are separated from other visitors and expire automatically." : "Sign in as a cashier to run sales or as a manager to configure the demo."}</p></div>
         {guestAccess && (
@@ -359,13 +360,16 @@ function LoginScreen({
             <small>No account, real payment, or personal information required.</small>
           </div>
         )}
-        {guestAccess && <div className="login-divider"><span>Staff sign-in</span></div>}
-        <form onSubmit={(event) => { event.preventDefault(); void submit(); }}>
-          <label className="field-label">Staff ID<input autoFocus={!guestAccess} autoComplete="username" value={staffId} onChange={(event) => setStaffId(event.target.value)} disabled={busy} /></label>
-          <label className="field-label">PIN<input type="password" inputMode="numeric" autoComplete="current-password" value={pin} onChange={(event) => setPin(event.target.value)} disabled={busy} /></label>
-          {error && <div className="refund-error" role="alert"><Icon name="alert" />{error}</div>}
-          <button className="login-submit" type="submit" disabled={busy}>{busy ? <span className="spinner" /> : <Icon name="lock" />}Sign in</button>
-        </form>
+        {guestAccess && staffLoginEnabled && <div className="login-divider"><span>Staff sign-in</span></div>}
+        {staffLoginEnabled && (
+          <form onSubmit={(event) => { event.preventDefault(); void submit(); }}>
+            <label className="field-label">Staff ID<input autoFocus={!guestAccess} autoComplete="username" value={staffId} onChange={(event) => setStaffId(event.target.value)} disabled={busy} /></label>
+            <label className="field-label">PIN<input type="password" inputMode="numeric" autoComplete="current-password" value={pin} onChange={(event) => setPin(event.target.value)} disabled={busy} /></label>
+            {error && <div className="refund-error" role="alert"><Icon name="alert" />{error}</div>}
+            <button className="login-submit" type="submit" disabled={busy}>{busy ? <span className="spinner" /> : <Icon name="lock" />}Sign in</button>
+          </form>
+        )}
+        {!staffLoginEnabled && error && <div className="refund-error" role="alert"><Icon name="alert" />{error}</div>}
         {showLocalCredentials && (
           <div className="demo-credentials"><span>Local demo accounts</span><button type="button" onClick={() => { setStaffId("cashier-01"); setPin("1234"); }}><strong>Cashier</strong><small>cashier-01 · 1234</small></button><button type="button" onClick={() => { setStaffId("manager-01"); setPin("2468"); }}><strong>Manager</strong><small>manager-01 · 2468</small></button></div>
         )}

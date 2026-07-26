@@ -1,4 +1,5 @@
 import cors from "@fastify/cors";
+import fastifyStatic from "@fastify/static";
 import {
   ApplicationError,
   PosService,
@@ -16,6 +17,7 @@ import {
   type PosRepository
 } from "@pos/persistence";
 import Fastify, { type FastifyInstance } from "fastify";
+import { resolve } from "node:path";
 import { ZodError, z } from "zod";
 
 import { loadConfig, type ApiConfig } from "./config.js";
@@ -86,6 +88,11 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   const providers = options.paymentProviders ?? [cardProvider, sandboxVietnamQrProvider];
   const service = new PosService(repository, providers);
   const authEnabled = config.authEnabled ?? true;
+  const publicSandbox = config.publicSandbox ?? false;
+  const staffLoginEnabled = !publicSandbox || (config.publicStaffLoginEnabled ?? false);
+  const trustProxy = config.trustProxyHops && config.trustProxyHops > 0
+    ? config.trustProxyHops
+    : false;
   const auth = new SandboxAuth(config);
   const app = Fastify({
     logger: options.logger === false ? false : {
@@ -102,6 +109,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
         censor: "[Redacted]"
       }
     },
+    trustProxy,
     bodyLimit: 1_048_576
   });
   const resetEnabled = config.demoResetEnabled ?? true;
@@ -178,6 +186,21 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
   });
 
+  if (config.staticDir) {
+    await app.register(fastifyStatic, {
+      root: resolve(config.staticDir),
+      index: ["index.html"],
+      setHeaders(response, filePath) {
+        response.header(
+          "Cache-Control",
+          filePath.includes("/assets/") || filePath.includes("\\assets\\")
+            ? "public, max-age=31536000, immutable"
+            : "no-cache"
+        );
+      }
+    });
+  }
+
   if (config.rateLimitEnabled ?? true) {
     app.addHook("onRequest", createRateLimitHook({
       generalMax: config.rateLimitMax ?? 240,
@@ -190,10 +213,28 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   app.addHook("onRequest", async (_request, reply) => {
     reply.header("X-Open-POS-Mode", "sandbox");
     reply.header("Cache-Control", "no-store");
+    reply.header("X-Content-Type-Options", "nosniff");
+    reply.header("X-Frame-Options", "DENY");
+    reply.header("Referrer-Policy", "no-referrer");
+    reply.header("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
+    reply.header("Cross-Origin-Opener-Policy", "same-origin");
+    reply.header("Cross-Origin-Resource-Policy", "same-origin");
+    if (publicSandbox) {
+      reply.header("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+      reply.header(
+        "Content-Security-Policy",
+        "default-src 'self'; base-uri 'none'; connect-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self'"
+      );
+    }
   });
 
   app.addHook("preHandler", async (request) => {
-    if (!authEnabled || request.method === "OPTIONS" || isPublicRoute(request.url)) return;
+    if (
+      !authEnabled ||
+      request.method === "OPTIONS" ||
+      isPublicRoute(request.url) ||
+      isStaticRequest(request.method, request.url, config.staticDir)
+    ) return;
     const authorization = request.headers.authorization;
     if (!authorization?.startsWith("Bearer ")) {
       throw new ApplicationError("Authentication is required", "UNAUTHORIZED", 401);
@@ -295,8 +336,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       },
       auth: {
         enabled: authEnabled,
-        publicSandbox: config.publicSandbox ?? false,
-        guestAccess: authEnabled && (config.publicSandbox ?? false)
+        publicSandbox,
+        guestAccess: authEnabled && publicSandbox,
+        staffLoginEnabled: authEnabled && staffLoginEnabled
       },
       demoReset: {
         enabled: resetEnabled,
@@ -314,6 +356,13 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   app.post("/v1/auth/login", async (request) => {
     if (!authEnabled) {
       throw new ApplicationError("Staff authentication is disabled", "AUTH_DISABLED", 404);
+    }
+    if (!staffLoginEnabled) {
+      throw new ApplicationError(
+        "Staff login is unavailable in this public sandbox",
+        "STAFF_LOGIN_DISABLED",
+        404
+      );
     }
     const body = staffLoginSchema.parse(request.body);
     const result = auth.login(body.staffId, body.pin);
@@ -363,6 +412,13 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   app.post("/v1/auth/manager-approvals", async (request) => {
     const staff = requireStaff(request);
     if (!staff) throw new ApplicationError("Authentication is required", "UNAUTHORIZED", 401);
+    if (staff.guest) {
+      throw new ApplicationError(
+        "Manager approvals are unavailable in guest sessions",
+        "GUEST_OPERATION_FORBIDDEN",
+        403
+      );
+    }
     const body = managerApprovalSchema.parse(request.body);
     await requirePaymentAccess(body.paymentId, staff);
     let approval: ReturnType<SandboxAuth["createManagerApproval"]>;
@@ -655,6 +711,13 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     if (authEnabled) {
       const staff = requireStaff(request);
       if (!staff) throw new ApplicationError("Authentication is required", "UNAUTHORIZED", 401);
+      if (staff.guest) {
+        throw new ApplicationError(
+          "Refunds are unavailable in guest sessions",
+          "GUEST_OPERATION_FORBIDDEN",
+          403
+        );
+      }
       await requirePaymentAccess(id, staff);
       const approvalToken = z.string().trim().min(1).parse(request.headers["x-manager-approval"]);
       managerId = auth.verifyManagerApproval(
@@ -780,7 +843,18 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     };
   });
 
-  app.setNotFoundHandler(async (_request, reply) => {
+  app.setNotFoundHandler(async (request, reply) => {
+    const path = request.url.split("?", 1)[0] ?? request.url;
+    if (
+      config.staticDir &&
+      request.method === "GET" &&
+      !path.startsWith("/v1/") &&
+      path !== "/health" &&
+      path !== "/ready" &&
+      String(request.headers.accept ?? "").includes("text/html")
+    ) {
+      return reply.type("text/html").sendFile("index.html", { cacheControl: false });
+    }
     return reply.code(404).send({
       error: { code: "ROUTE_NOT_FOUND", message: "Route not found" }
     });
@@ -800,6 +874,11 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     });
   });
 
+  if (publicSandbox && resetEnabled) {
+    await service.resetDemoData("system:start-reset");
+    lastDemoResetAt = new Date();
+    app.log.info({ action: "DEMO_DATA_START_RESET" }, "Public sandbox data reset at startup");
+  }
   scheduleAutomaticReset();
 
   app.addHook("onClose", async () => {
@@ -819,6 +898,12 @@ function isPublicRoute(url: string): boolean {
     || path === "/v1/auth/login"
     || path === "/v1/auth/guest"
     || path === "/v1/providers/simulated/webhooks";
+}
+
+function isStaticRequest(method: string, url: string, staticDir?: string): boolean {
+  if (!staticDir || (method !== "GET" && method !== "HEAD")) return false;
+  const path = url.split("?", 1)[0] ?? url;
+  return !path.startsWith("/v1/") && path !== "/health" && path !== "/ready";
 }
 
 function headerRecord(

@@ -8,6 +8,7 @@ describe("sandbox configuration", () => {
     expect(config).toMatchObject({
       appMode: "sandbox",
       publicSandbox: false,
+      publicStaffLoginEnabled: false,
       authEnabled: true,
       rateLimitEnabled: true,
       demoResetEnabled: true
@@ -41,6 +42,43 @@ describe("sandbox configuration", () => {
       corsOrigins: ["https://sandbox.example.test"],
       demoResetIntervalMinutes: 60
     });
+  });
+
+  it("supports a guest-only same-origin public deployment without exposing staff credentials", () => {
+    const config = loadConfig({
+      PUBLIC_SANDBOX: "true",
+      STATIC_DIR: "apps/register/dist",
+      CORS_ORIGINS: "",
+      AUTH_SECRET: "auth-secret-at-least-thirty-two-characters-long",
+      SIMULATED_WEBHOOK_SECRET: "webhook-secret-at-least-thirty-two-characters",
+      DEMO_RESET_INTERVAL_MINUTES: "60",
+      TRUST_PROXY_HOPS: "1"
+    });
+    expect(config).toMatchObject({
+      publicSandbox: true,
+      publicStaffLoginEnabled: false,
+      staticDir: "apps/register/dist",
+      corsOrigins: [],
+      trustProxyHops: 1
+    });
+  });
+
+  it("requires hardened staff PINs only when a public deployment exposes staff login", () => {
+    const base = {
+      PUBLIC_SANDBOX: "true",
+      PUBLIC_STAFF_LOGIN_ENABLED: "true",
+      STATIC_DIR: "apps/register/dist",
+      CORS_ORIGINS: "",
+      AUTH_SECRET: "auth-secret-at-least-thirty-two-characters-long",
+      SIMULATED_WEBHOOK_SECRET: "webhook-secret-at-least-thirty-two-characters",
+      DEMO_RESET_INTERVAL_MINUTES: "60"
+    };
+    expect(() => loadConfig(base)).toThrow(/staff login requires distinct/);
+    expect(loadConfig({
+      ...base,
+      DEMO_CASHIER_PIN: "135790",
+      DEMO_MANAGER_PIN: "246801"
+    }).publicStaffLoginEnabled).toBe(true);
   });
 
   it("rejects the known .env.example placeholder secrets in public mode", () => {

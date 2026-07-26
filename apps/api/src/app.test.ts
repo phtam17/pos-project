@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { PaymentAttempt } from "@pos/domain";
 import {
   PaymentProviderError,
@@ -21,9 +24,13 @@ const config: ApiConfig = {
 };
 
 const openApps: Awaited<ReturnType<typeof buildApp>>[] = [];
+const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
   await Promise.all(openApps.splice(0).map((app) => app.close()));
+  await Promise.all(temporaryDirectories.splice(0).map((directory) =>
+    rm(directory, { recursive: true, force: true })
+  ));
 });
 
 async function app(paymentProvider?: SimulatedPaymentProvider) {
@@ -37,6 +44,48 @@ async function app(paymentProvider?: SimulatedPaymentProvider) {
 }
 
 describe("POS API vertical slice", () => {
+  it("serves the production register from the API origin with security headers", async () => {
+    const staticDir = await mkdtemp(join(tmpdir(), "open-pos-static-"));
+    temporaryDirectories.push(staticDir);
+    await writeFile(join(staticDir, "index.html"), "<!doctype html><title>Open POS test</title>");
+    await mkdir(join(staticDir, "assets"));
+    await writeFile(join(staticDir, "assets", "app.js"), "console.log('sandbox')");
+    const instance = await buildApp({
+      config: {
+        ...config,
+        publicSandbox: true,
+        authEnabled: true,
+        authSecret: "public-static-test-auth-secret-long-enough",
+        staticDir
+      },
+      logger: false
+    });
+    openApps.push(instance);
+
+    const index = await instance.inject({
+      method: "GET",
+      url: "/orders",
+      headers: { accept: "text/html" }
+    });
+    expect(index.statusCode).toBe(200);
+    expect(index.body).toContain("Open POS test");
+    expect(index.headers["content-security-policy"]).toContain("default-src 'self'");
+    expect(index.headers["strict-transport-security"]).toContain("max-age=31536000");
+    expect(index.headers["x-content-type-options"]).toBe("nosniff");
+
+    const asset = await instance.inject({ method: "GET", url: "/assets/app.js" });
+    expect(asset.statusCode).toBe(200);
+    expect(asset.headers["cache-control"]).toBe("public, max-age=31536000, immutable");
+
+    const missingApi = await instance.inject({
+      method: "GET",
+      url: "/v1/does-not-exist",
+      headers: { accept: "text/html" }
+    });
+    expect(missingApi.statusCode).toBe(401);
+    expect(missingApi.json<{ error: { code: string } }>().error.code).toBe("UNAUTHORIZED");
+  });
+
   it("lets sandbox memory mode override a configured PostgreSQL URL", async () => {
     const instance = await buildApp({
       config: {
@@ -1505,6 +1554,15 @@ describe("POS API vertical slice", () => {
     const instance = await buildApp({ config: publicConfig, logger: false });
     openApps.push(instance);
 
+    const runtime = await instance.inject({ method: "GET", url: "/v1/runtime-status" });
+    expect(runtime.json<{ auth: { guestAccess: boolean; staffLoginEnabled: boolean } }>().auth)
+      .toMatchObject({ guestAccess: true, staffLoginEnabled: false });
+    expect((await instance.inject({
+      method: "POST",
+      url: "/v1/auth/login",
+      payload: { staffId: "manager-01", pin: "246810" }
+    })).statusCode).toBe(404);
+
     const startGuest = async () => {
       const response = await instance.inject({ method: "POST", url: "/v1/auth/guest" });
       expect(response.statusCode).toBe(200);
@@ -1562,7 +1620,26 @@ describe("POS API vertical slice", () => {
       payload: { tender: "card", terminalId: "guest-reader" }
     });
     expect(paymentAResponse.statusCode).toBe(201);
-    const paymentA = paymentAResponse.json<{ id: string; paymentId: string }>();
+    const paymentA = paymentAResponse.json<{ id: string; paymentId: string; amountMinor: string }>();
+
+    expect((await instance.inject({
+      method: "POST",
+      url: "/v1/auth/manager-approvals",
+      headers: headersA,
+      payload: {
+        managerId: "manager-01",
+        managerPin: "246810",
+        paymentId: paymentA.paymentId,
+        amountMinor: paymentA.amountMinor,
+        idempotencyKey: "guest-refund-attempt"
+      }
+    })).statusCode).toBe(403);
+    expect((await instance.inject({
+      method: "POST",
+      url: `/v1/payments/${paymentA.paymentId}/refunds`,
+      headers: { ...headersA, "idempotency-key": "guest-refund-attempt" },
+      payload: { amountMinor: paymentA.amountMinor, reason: "Guest cannot refund" }
+    })).statusCode).toBe(403);
 
     const ordersA = (await instance.inject({
       method: "GET",

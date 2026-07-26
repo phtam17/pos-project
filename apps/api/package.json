@@ -5,6 +5,7 @@
   "type": "module",
   "dependencies": {
     "@fastify/cors": "^11.0.0",
+    "@fastify/static": "^10.1.2",
     "@pos/application": "0.1.0",
     "@pos/domain": "0.1.0",
     "@pos/payment-contract": "0.1.0",

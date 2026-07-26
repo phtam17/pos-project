@@ -10,6 +10,8 @@ export interface StaffCredential {
 export interface ApiConfig {
   readonly host: string;
   readonly port: number;
+  readonly trustProxyHops?: number;
+  readonly staticDir?: string;
   readonly databaseUrl?: string;
   readonly persistenceMode?: "memory" | "postgres";
   readonly simulatedWebhookSecret: string;
@@ -17,6 +19,7 @@ export interface ApiConfig {
   readonly corsOrigins: readonly string[];
   readonly appMode?: "sandbox";
   readonly publicSandbox?: boolean;
+  readonly publicStaffLoginEnabled?: boolean;
   readonly authEnabled?: boolean;
   readonly authSecret?: string;
   readonly staffCredentials?: readonly StaffCredential[];
@@ -69,6 +72,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     );
   }
   const publicSandbox = booleanValue(env.PUBLIC_SANDBOX, false, "PUBLIC_SANDBOX");
+  const publicStaffLoginEnabled = booleanValue(
+    env.PUBLIC_STAFF_LOGIN_ENABLED,
+    false,
+    "PUBLIC_STAFF_LOGIN_ENABLED"
+  );
   const authEnabled = booleanValue(env.SANDBOX_AUTH_ENABLED, true, "SANDBOX_AUTH_ENABLED");
   const authSecret = env.AUTH_SECRET?.trim() || DEVELOPMENT_AUTH_SECRET;
   const simulatedWebhookSecret = env.SIMULATED_WEBHOOK_SECRET?.trim() || DEVELOPMENT_WEBHOOK_SECRET;
@@ -89,6 +97,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
   const config: ApiConfig = {
     host: env.HOST?.trim() || "127.0.0.1",
     port,
+    trustProxyHops: integerValue(env.TRUST_PROXY_HOPS, 0, 0, 10, "TRUST_PROXY_HOPS"),
+    ...(env.STATIC_DIR?.trim() ? { staticDir: env.STATIC_DIR.trim() } : {}),
     ...(databaseUrl ? { databaseUrl } : {}),
     persistenceMode,
     simulatedWebhookSecret,
@@ -96,6 +106,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     corsOrigins: origins,
     appMode: "sandbox",
     publicSandbox,
+    publicStaffLoginEnabled,
     authEnabled,
     authSecret,
     staffCredentials: [
@@ -151,18 +162,23 @@ function validatePublicSandbox(config: ApiConfig): void {
   if (config.authSecret === config.simulatedWebhookSecret) {
     throw new Error("PUBLIC_SANDBOX requires separate AUTH_SECRET and SIMULATED_WEBHOOK_SECRET values");
   }
-  const credentials = config.staffCredentials ?? [];
-  if (
-    credentials.length < 2 ||
-    credentials.some((credential) => !/^\d{6,}$/.test(credential.pin)) ||
-    credentials.some((credential) =>
-      credential.pin === DEVELOPMENT_CASHIER_PIN || credential.pin === DEVELOPMENT_MANAGER_PIN
-    ) ||
-    new Set(credentials.map((credential) => credential.pin)).size !== credentials.length
-  ) {
-    throw new Error("PUBLIC_SANDBOX requires distinct, non-default staff PINs of at least 6 digits");
+  if (config.publicStaffLoginEnabled) {
+    const credentials = config.staffCredentials ?? [];
+    if (
+      credentials.length < 2 ||
+      credentials.some((credential) => !/^\d{6,}$/.test(credential.pin)) ||
+      credentials.some((credential) =>
+        credential.pin === DEVELOPMENT_CASHIER_PIN || credential.pin === DEVELOPMENT_MANAGER_PIN
+      ) ||
+      new Set(credentials.map((credential) => credential.pin)).size !== credentials.length
+    ) {
+      throw new Error(
+        "PUBLIC_SANDBOX with staff login requires distinct, non-default staff PINs of at least 6 digits"
+      );
+    }
   }
-  if (
+  const sameOriginStaticDeployment = Boolean(config.staticDir) && config.corsOrigins.length === 0;
+  if (!sameOriginStaticDeployment && (
     config.corsOrigins.length === 0 ||
     config.corsOrigins.includes("*") ||
     config.corsOrigins.some((origin) => {
@@ -172,8 +188,10 @@ function validatePublicSandbox(config: ApiConfig): void {
         return true;
       }
     })
-  ) {
-    throw new Error("PUBLIC_SANDBOX requires explicit HTTPS CORS_ORIGINS");
+  )) {
+    throw new Error(
+      "PUBLIC_SANDBOX requires explicit HTTPS CORS_ORIGINS or a same-origin STATIC_DIR deployment"
+    );
   }
   if (!config.demoResetEnabled || (config.demoResetIntervalMinutes ?? 0) <= 0) {
     throw new Error("PUBLIC_SANDBOX requires an automatic DEMO_RESET_INTERVAL_MINUTES");

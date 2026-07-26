@@ -121,7 +121,12 @@ export interface RuntimeStatusDto {
     card: { ready: boolean; provider?: string };
     vietnamQr: { ready: boolean; provider?: string };
   };
-  auth: { enabled: boolean; publicSandbox: boolean; guestAccess: boolean };
+  auth: {
+    enabled: boolean;
+    publicSandbox: boolean;
+    guestAccess: boolean;
+    staffLoginEnabled: boolean;
+  };
   demoReset: { enabled: boolean; automatic: boolean; nextAt?: string; lastAt?: string };
   warnings: string[];
   checkedAt: string;
@@ -382,7 +387,8 @@ function normalizeRuntimeStatus(value: unknown): RuntimeStatusDto {
     auth: {
       enabled: auth.enabled !== false,
       publicSandbox: auth.publicSandbox === true,
-      guestAccess: auth.guestAccess === true
+      guestAccess: auth.guestAccess === true,
+      staffLoginEnabled: auth.staffLoginEnabled !== false
     },
     demoReset: {
       enabled: demoReset.enabled !== false,
