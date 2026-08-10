@@ -5,13 +5,13 @@
   "type": "module",
   "dependencies": {
     "@fastify/cors": "^11.0.0",
-    "@fastify/static": "^10.1.2",
+    "@fastify/static": "^10.1.3",
     "@pos/application": "0.1.0",
     "@pos/domain": "0.1.0",
     "@pos/payment-contract": "0.1.0",
     "@pos/payments-simulated": "0.1.0",
     "@pos/persistence": "0.1.0",
-    "fastify": "^5.4.0",
+    "fastify": "^5.11.2",
     "zod": "^3.25.0"
   }
 }
