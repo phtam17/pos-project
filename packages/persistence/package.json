@@ -13,9 +13,9 @@
   },
   "dependencies": {
     "@pos/domain": "0.1.0",
-    "pg": "^8.16.0"
+    "pg": "^8.23.1"
   },
   "devDependencies": {
-    "@types/pg": "^8.15.0"
+    "@types/pg": "^8.23.1"
   }
 }
